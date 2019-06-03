@@ -191,7 +191,7 @@ func NewInstanceServiceFromCloud(cloud clientconfig.Cloud, cacert []byte) (*Inst
 		config.RootCAs = caCertPool
 	}
 
-	config.InsecureSkipVerify = *cloudFromYaml.Verify
+	config.InsecureSkipVerify = !*cloudFromYaml.Verify
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: config}
 	provider.HTTPClient.Transport = transport
 
@@ -581,7 +581,8 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 	}
 
 	// If the root volume Size is not 0, means boot from volume
-	if config.RootVolume != nil && config.RootVolume.Size != 0 {
+	//if config.RootVolume != nil && config.RootVolume.Size != 0 {
+	if config.RootVolume != nil {
 		var blocks []bootfromvolume.BlockDevice
 
 		block := bootfromvolume.BlockDevice{
@@ -589,9 +590,9 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 			BootIndex:           0,
 			UUID:                config.RootVolume.SourceUUID,
 			DeleteOnTermination: true,
-			DestinationType:     bootfromvolume.DestinationVolume,
-			VolumeSize:          config.RootVolume.Size,
-			DeviceType:          config.RootVolume.DeviceType,
+			DestinationType:     bootfromvolume.DestinationLocal,
+			//VolumeSize:          config.RootVolume.Size,
+			//DeviceType:          config.RootVolume.DeviceType,
 		}
 		blocks = append(blocks, block)
 
