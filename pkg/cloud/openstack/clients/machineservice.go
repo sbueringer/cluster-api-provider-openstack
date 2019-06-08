@@ -280,11 +280,11 @@ func (is *InstanceService) GetAcceptableFloatingIP() (string, error) {
 }
 
 // A function for getting the id of a network by querying openstack with filters
-func getNetworkIDsByFilter(is *InstanceService, opts *networks.ListOpts) ([]string, error) {
+func getNetworkIDsByFilter(networkClient *gophercloud.ServiceClient, opts *networks.ListOpts) ([]string, error) {
 	if opts == nil {
 		return []string{}, fmt.Errorf("No Filters were passed")
 	}
-	pager := networks.List(is.networkClient, opts)
+	pager := networks.List(networkClient, opts)
 	var uuids []string
 	err := pager.EachPage(func(page pagination.Page) (bool, error) {
 		networkList, err := networks.ExtractNetworks(page)
@@ -305,11 +305,11 @@ func getNetworkIDsByFilter(is *InstanceService, opts *networks.ListOpts) ([]stri
 }
 
 // A function for getting the id of a subnet by querying openstack with filters
-func getSubnetsByFilter(is *InstanceService, opts *subnets.ListOpts) ([]subnets.Subnet, error) {
+func getSubnetsByFilter(networkClient *gophercloud.ServiceClient, opts *subnets.ListOpts) ([]subnets.Subnet, error) {
 	if opts == nil {
 		return []subnets.Subnet{}, fmt.Errorf("No Filters were passed")
 	}
-	pager := subnets.List(is.networkClient, opts)
+	pager := subnets.List(networkClient, opts)
 	var snets []subnets.Subnet
 	err := pager.EachPage(func(page pagination.Page) (bool, error) {
 		subnetList, err := subnets.ExtractSubnets(page)
@@ -451,7 +451,7 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 	for _, net := range config.Networks {
 		opts := networks.ListOpts(net.Filter)
 		opts.ID = net.UUID
-		ids, err := getNetworkIDsByFilter(is, &opts)
+		ids, err := getNetworkIDsByFilter(is.networkClient, &opts)
 		if err != nil {
 			return nil, err
 		}
@@ -466,7 +466,7 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 				sopts := subnets.ListOpts(snet.Filter)
 				sopts.ID = snet.UUID
 				sopts.NetworkID = netID
-				snets, err := getSubnetsByFilter(is, &sopts)
+				snets, err := getSubnetsByFilter(is.networkClient, &sopts)
 				if err != nil {
 					return nil, err
 				}

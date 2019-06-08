@@ -223,9 +223,13 @@ func (s *NetworkService) reconcileRouter(clusterName, name string, desired opens
 	if len(routerList) == 0 {
 		opts := routers.CreateOpts{
 			Name: name,
-			GatewayInfo: &routers.GatewayInfo{
+		}
+		// only set the GatewayInfo right now when no externalIPs
+		// should be configured
+		if len(desired.ExternalFixedIPs) == 0 {
+			opts.GatewayInfo = &routers.GatewayInfo{
 				NetworkID: desired.ExternalNetworkID,
-			},
+			}
 		}
 		newRouter, err := routers.Create(s.client, opts).Extract()
 		if err != nil {
@@ -234,6 +238,36 @@ func (s *NetworkService) reconcileRouter(clusterName, name string, desired opens
 		router = *newRouter
 	} else {
 		router = routerList[0]
+	}
+
+	if len(desired.ExternalFixedIPs) > 0 {
+		var updateOpts routers.UpdateOpts
+		updateOpts.GatewayInfo = &routers.GatewayInfo{
+			NetworkID: desired.ExternalNetworkID,
+		}
+		for _, externalFixedIP := range desired.ExternalFixedIPs {
+			subnetID := externalFixedIP.Subnet.UUID
+			if subnetID == "" {
+				sopts := subnets.ListOpts(externalFixedIP.Subnet.Filter)
+				snets, err := getSubnetsByFilter(s.client, &sopts)
+				if err != nil {
+					return emptyRouter, err
+				}
+				if len(snets) != 1 {
+					return emptyRouter, fmt.Errorf("subnetParam didn't exactly match one subnet")
+				}
+				subnetID = snets[0].ID
+			}
+			updateOpts.GatewayInfo.ExternalFixedIPs = append(updateOpts.GatewayInfo.ExternalFixedIPs, routers.ExternalFixedIP{
+				IPAddress: externalFixedIP.FixedIP,
+				SubnetID:  subnetID,
+			})
+		}
+
+		_, err = routers.Update(s.client, router.ID, updateOpts).Extract()
+		if err != nil {
+			return emptyRouter, fmt.Errorf("error updating OpenStack Neutron Router: %s", err)
+		}
 	}
 
 	observedRouter := openstackconfigv1.Router{

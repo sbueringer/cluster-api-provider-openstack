@@ -203,6 +203,10 @@ type OpenstackClusterProviderSpec struct {
 	// to get public internet to the VMs.
 	ExternalNetworkID string `json:"externalNetworkId,omitempty"`
 
+	// ExternalFixedIPs is an array of externalIPs on the respective subnets.
+	// This is necessary if the router needs a fixed ip in a specific subnet.
+	ExternalFixedIPs []ExternalFixedIPParam `json:"externalFixedIPs,omitempty"`
+
 	// ManagedSecurityGroups defines that kubernetes manages the OpenStack security groups
 	// for now, that means that we'll create two security groups, one allowing SSH
 	// and API access from everywhere, and another one that allows all traffic to/from
@@ -214,6 +218,13 @@ type OpenstackClusterProviderSpec struct {
 
 	// Default: True. In case of server tag errors, set to False
 	DisableServerTags bool `json:"disableServerTags,omitempty"`
+}
+
+type ExternalFixedIPParam struct {
+	// The FixedIP in the corresponding subnet
+	FixedIP string `json:"fixedIP,omitempty"`
+	// The subnet in which the FixedIP is used for the Gateway of this router
+	Subnet SubnetParam `json:"subnet"`
 }
 
 // +genclient
