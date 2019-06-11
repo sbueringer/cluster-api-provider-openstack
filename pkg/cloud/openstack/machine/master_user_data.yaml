@@ -1,0 +1,185 @@
+locksmith:
+  reboot_strategy: "off"
+storage:
+  directories:
+    - path: /opt
+      filesystem: root
+      mode: 0755
+      user:
+        id: 0
+      group:
+        id: 0
+    - path: /opt/kubetmp
+      filesystem: root
+      mode: 0755
+      user:
+        id: 0
+      group:
+        id: 0
+    - path: /opt/bin
+      filesystem: root
+      mode: 0755
+      user:
+        id: 0
+      group:
+        id: 0
+    - path: /opt/cni
+      filesystem: root
+      mode: 0755
+      user:
+        id: 0
+      group:
+        id: 0
+    - path: /opt/cni/bin
+      filesystem: root
+      mode: 0755
+      user:
+        id: 0
+      group:
+        id: 0
+  files:
+    - path: /etc/hostname
+      filesystem: root
+      contents:
+        inline: |
+          {{ .Machine.ObjectMeta.Name }}
+      mode: 0644
+      user:
+        id: 0
+      group:
+        id: 0
+    - path: /opt/bin/download-binaries.sh
+      filesystem: root
+      contents:
+        inline: |
+          #!/usr/bin/env bash
+
+          test -s /opt/bin/kubeadm && \
+            test -s /opt/bin/kubelet && \
+            test -s /opt/bin/kubectl && \
+            echo "Skipped downloading k8s binaries." && exit
+
+          registry="reg-dhc.app.corpintra.net"
+          image="caas/kubeadm"
+          tag="${2:-v1.14.3}"
+
+           # fetch sha256 of the first layer from docker manifest
+          layer=`curl -s "https://${registry}/v2/${image}/manifests/${tag}" |jq -r .fsLayers[0].blobSum`
+
+           # download the layer
+          curl -L --retry 10 -o "/tmp/kubeadm.tar.gz" "https://${registry}/v2/${image}/blobs/${layer}"
+
+          # extract the binaries
+          tar xvf "/tmp/kubeadm.tar.gz" -C /opt/bin
+          rm "/tmp/kubeadm.tar.gz"
+      mode: 0755
+      user:
+        id: 0
+      group:
+        id: 0
+    - path: /etc/kubernetes/cloud.conf
+      filesystem: root
+      contents:
+        inline: |+
+          [Global]
+          auth-url={{ .CloudConf.IdentityEndpoint }}
+          username="{{ .CloudConf.Username }}"
+          password="{{ .CloudConf.Password }}"
+          # TODO region??
+          region="nova"
+          tenant-id="{{ .CloudConf.TenantID }}"
+          domain-name="{{ .CloudConf.DomainName }}"
+      mode: 0600
+      user:
+        id: 0
+      group:
+        id: 0
+    - contents:
+        inline: |
+          #!/bin/bash
+
+          . /run/metadata/coreos
+
+          if [[ -z "$COREOS_OPENSTACK_IPV4_LOCAL" ]]; then
+            echo "Falling back to localhost."
+            COREOS_OPENSTACK_IPV4_LOCAL="localhost"
+          fi
+
+          echo "Replacing COREOS_OPENSTACK_IPV4_LOCAL in kubeadm_config through ${COREOS_OPENSTACK_IPV4_LOCAL}"
+          /usr/bin/sed -i "s#\${COREOS_OPENSTACK_IPV4_LOCAL}#$COREOS_OPENSTACK_IPV4_LOCAL#" /etc/kubernetes/kubeadm_config.yaml
+      filesystem: root
+      group:
+        id: 0
+      mode: 493
+      path: /opt/bin/prepare.sh
+      user:
+        id: 0
+
+{{ .KubeadmFiles }}
+
+systemd:
+  units:
+    - name: coreos-metadata.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=CoreOS Metadata Agent
+
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/bin/coreos-metadata --provider openstack-metadata --attributes=/run/metadata/coreos
+
+        [Install]
+        RequiredBy=metadata.target
+
+    - name: docker.service
+      enabled: true
+
+    - name: kubelet.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=kubelet: The Kubernetes Node Agent
+        Documentation=http://kubernetes.io/docs/
+
+        [Service]
+        ExecStart=/opt/bin/kubelet
+        Restart=always
+        StartLimitInterval=0
+        RestartSec=10
+
+        [Install]
+        WantedBy=multi-user.target
+      dropins:
+        - contents: |
+            [Service]
+            Environment="KUBELET_KUBECONFIG_ARGS=--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf"
+            Environment="KUBELET_CONFIG_ARGS=--config=/var/lib/kubelet/config.yaml"
+            # This is a file that "kubeadm init" and "kubeadm join" generates at runtime, populating the KUBELET_KUBEADM_ARGS variable dynamically
+            EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env
+            # This is a file that the user can use for overrides of the kubelet args as a last resort. Preferably, the user should use
+            # the .NodeRegistration.KubeletExtraArgs object in the configuration files instead. KUBELET_EXTRA_ARGS should be sourced from this file.
+            EnvironmentFile=-/etc/default/kubelet
+            ExecStart=
+            ExecStart=/opt/bin/kubelet $KUBELET_KUBECONFIG_ARGS $KUBELET_CONFIG_ARGS $KUBELET_KUBEADM_ARGS $KUBELET_EXTRA_ARGS
+          name: 10-kubeadm.conf
+
+    - contents: |-
+        [Unit]
+        Description=Initialise bootkube master.
+        After=kubelet.service
+        Requires=coreos-metadata.service
+
+        [Service]
+        Type=oneshot
+        Environment="PATH=/usr/bin:/usr/sbin:/opt/bin:/opt/cni/bin:/bin/sbin/opt/bin"
+        ExecStartPre=/opt/bin/download-binaries.sh
+        ExecStartPre=/opt/bin/prepare.sh
+        ExecStart=/opt/bin/kubeadm init --config /etc/kubernetes/kubeadm_config.yaml
+        ExecStartPost=/opt/bin/kubectl --kubeconfig /etc/kubernetes/kubelet.conf annotate --overwrite node %H machine={{ .Machine.ObjectMeta.Namespace }}/{{ .Machine.ObjectMeta.Name }}
+        ExecStartPost=/usr/bin/systemctl disable kubeadm.service
+
+        [Install]
+        WantedBy=multi-user.target
+      enabled: true
+      name: kubeadm.service

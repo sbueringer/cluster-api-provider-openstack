@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
+	clusterclient "sigs.k8s.io/cluster-api/pkg/client/clientset_generated/clientset/typed/cluster/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -27,6 +28,7 @@ import (
 type ActuatorParams struct {
 	KubeClient    kubernetes.Interface
 	Client        client.Client
+	ClusterClient clusterclient.ClusterV1alpha1Interface
 	EventRecorder record.EventRecorder
 	Scheme        *runtime.Scheme
 }

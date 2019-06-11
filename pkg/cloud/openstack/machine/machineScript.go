@@ -18,92 +18,44 @@ package machine
 
 import (
 	"bytes"
-	"errors"
+	"sigs.k8s.io/cluster-api-provider-openstack/pkg/cloud/openstack/clients"
 	"text/template"
-
-	"fmt"
 
 	openstackconfigv1 "sigs.k8s.io/cluster-api-provider-openstack/pkg/apis/openstackproviderconfig/v1alpha1"
 	clusterv1 "sigs.k8s.io/cluster-api/pkg/apis/cluster/v1alpha1"
 )
 
 type setupParams struct {
-	Token       string
 	Cluster     *clusterv1.Cluster
+	ClusterSpec *openstackconfigv1.OpenstackClusterProviderSpec
+	CACert      string
+	CAKey       string
+
+	CloudConf    clients.CloudConf
+	KubeadmFiles string
+
 	Machine     *clusterv1.Machine
 	MachineSpec *openstackconfigv1.OpenstackProviderSpec
 
-	PodCIDR           string
-	ServiceCIDR       string
-	GetMasterEndpoint func() (string, error)
+	PodCIDR     string
+	ServiceCIDR string
 }
 
-func init() {
-}
-
-func masterStartupScript(cluster *clusterv1.Cluster, machine *clusterv1.Machine, script string) (string, error) {
-	machineSpec, err := openstackconfigv1.MachineSpecFromProviderSpec(machine.Spec.ProviderSpec)
-	if err != nil {
-		return "", err
-	}
+func startupScript(machine *clusterv1.Machine, cloudConf clients.CloudConf, kubeadmFiles string, script string) (string, error) {
 
 	params := setupParams{
-		Cluster:     cluster,
-		Machine:     machine,
-		MachineSpec: machineSpec,
-		PodCIDR:     getSubnet(cluster.Spec.ClusterNetwork.Pods),
-		ServiceCIDR: getSubnet(cluster.Spec.ClusterNetwork.Services),
+		Machine:      machine,
+		CloudConf:    cloudConf,
+		KubeadmFiles: kubeadmFiles,
 	}
 
-	masterStartUpScript := template.Must(template.New("masterStartUp").Parse(script))
+	startUpScript := template.Must(template.New("startUp").Parse(script))
 
 	var buf bytes.Buffer
-	if err := masterStartUpScript.Execute(&buf, params); err != nil {
+	if err := startUpScript.Execute(&buf, params); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
-}
-
-func nodeStartupScript(cluster *clusterv1.Cluster, machine *clusterv1.Machine, token, script string) (string, error) {
-	machineSpec, err := openstackconfigv1.MachineSpecFromProviderSpec(machine.Spec.ProviderSpec)
-	if err != nil {
-		return "", err
-	}
-
-	GetMasterEndpoint := func() (string, error) {
-		if len(cluster.Status.APIEndpoints) == 0 {
-			return "", errors.New("no cluster status found")
-		}
-		return getEndpoint(cluster.Status.APIEndpoints[0]), nil
-	}
-
-	params := setupParams{
-		Token:             token,
-		Cluster:           cluster,
-		Machine:           machine,
-		MachineSpec:       machineSpec,
-		PodCIDR:           getSubnet(cluster.Spec.ClusterNetwork.Pods),
-		ServiceCIDR:       getSubnet(cluster.Spec.ClusterNetwork.Services),
-		GetMasterEndpoint: GetMasterEndpoint,
-	}
-
-	nodeStartUpScript := template.Must(template.New("nodeStartUp").Parse(script))
-
-	var buf bytes.Buffer
-	if err := nodeStartUpScript.Execute(&buf, params); err != nil {
-		return "", err
-	}
-	return buf.String(), nil
-}
-
-func getEndpoint(apiEndpoint clusterv1.APIEndpoint) string {
-	return fmt.Sprintf("%s:%d", apiEndpoint.Host, apiEndpoint.Port)
 }
 
 // Just a temporary hack to grab a single range from the config.
-func getSubnet(netRange clusterv1.NetworkRanges) string {
-	if len(netRange.CIDRBlocks) == 0 {
-		return ""
-	}
-	return netRange.CIDRBlocks[0]
-}

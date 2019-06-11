@@ -18,6 +18,7 @@ package controller
 
 import (
 	"k8s.io/klog"
+	"sigs.k8s.io/cluster-api/pkg/client/clientset_generated/clientset"
 
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/cluster-api-provider-openstack/pkg/cloud/openstack"
@@ -41,6 +42,11 @@ func AddToManager(m manager.Manager) error {
 func getActuatorParams(mgr manager.Manager) openstack.ActuatorParams {
 	config := mgr.GetConfig()
 
+	cs, err := clientset.NewForConfig(config)
+	if err != nil {
+		klog.Fatalf("Could not create clientset to talk to the apiserver: %v", err)
+	}
+
 	kubeClient, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		klog.Fatalf("Could not create kubernetes client to talk to the apiserver: %v", err)
@@ -49,6 +55,7 @@ func getActuatorParams(mgr manager.Manager) openstack.ActuatorParams {
 	return openstack.ActuatorParams{
 		Client:        mgr.GetClient(),
 		KubeClient:    kubeClient,
+		ClusterClient: cs.ClusterV1alpha1(),
 		Scheme:        mgr.GetScheme(),
 		EventRecorder: mgr.GetRecorder("openstack-controller"),
 	}

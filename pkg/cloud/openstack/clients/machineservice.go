@@ -50,6 +50,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog"
 	openstackconfigv1 "sigs.k8s.io/cluster-api-provider-openstack/pkg/apis/openstackproviderconfig/v1alpha1"
+	providerv1 "sigs.k8s.io/cluster-api-provider-openstack/pkg/apis/openstackproviderconfig/v1alpha1"
 	clusterv1 "sigs.k8s.io/cluster-api/pkg/apis/cluster/v1alpha1"
 	"sigs.k8s.io/cluster-api/pkg/util"
 )
@@ -71,6 +72,7 @@ type InstanceService struct {
 	identityClient *gophercloud.ServiceClient
 	networkClient  *gophercloud.ServiceClient
 	imagesClient   *gophercloud.ServiceClient
+	CloudConf      CloudConf
 }
 
 type Instance struct {
@@ -93,6 +95,14 @@ type InstanceListOpts struct {
 	// only, you can use a regular expression matching the syntax of the
 	// underlying database server implemented for Compute.
 	Name string `q:"name"`
+}
+
+type CloudConf struct {
+	IdentityEndpoint string
+	Username         string
+	Password         string
+	TenantID         string
+	DomainName       string
 }
 
 func GetCloudFromSecret(kubeClient kubernetes.Interface, namespace string, secretName string, cloudName string) (clientconfig.Cloud, []byte, error) {
@@ -132,7 +142,7 @@ func GetCloudFromSecret(kubeClient kubernetes.Interface, namespace string, secre
 }
 
 // TODO: Eventually we'll have a NewInstanceServiceFromCluster too
-func NewInstanceServiceFromMachine(kubeClient kubernetes.Interface, machine *clusterv1.Machine) (*InstanceService, error) {
+func NewInstanceServiceFromMachine(kubeClient kubernetes.Interface, clusterName string, machine *clusterv1.Machine) (*InstanceService, error) {
 	machineSpec, err := openstackconfigv1.MachineSpecFromProviderSpec(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, err
@@ -150,16 +160,16 @@ func NewInstanceServiceFromMachine(kubeClient kubernetes.Interface, machine *clu
 			return nil, err
 		}
 	}
-	return NewInstanceServiceFromCloud(cloud, cacert)
+	return NewInstanceServiceFromCloud(cloud, clusterName, cacert)
 }
 
 func NewInstanceService() (*InstanceService, error) {
 	cloud := clientconfig.Cloud{}
 	var cacert []byte
-	return NewInstanceServiceFromCloud(cloud, cacert)
+	return NewInstanceServiceFromCloud(cloud, "", cacert)
 }
 
-func NewInstanceServiceFromCloud(cloud clientconfig.Cloud, cacert []byte) (*InstanceService, error) {
+func NewInstanceServiceFromCloud(cloud clientconfig.Cloud, clusterName string, cacert []byte) (*InstanceService, error) {
 	clientOpts := new(clientconfig.ClientOpts)
 	var opts *gophercloud.AuthOptions
 
@@ -168,6 +178,9 @@ func NewInstanceServiceFromCloud(cloud clientconfig.Cloud, cacert []byte) (*Inst
 		clientOpts.AuthType = cloud.AuthType
 		clientOpts.Cloud = cloud.Cloud
 		clientOpts.RegionName = cloud.RegionName
+	} else {
+		clientOpts.Cloud = clusterName
+		cloud.Cloud = clusterName
 	}
 
 	opts, err := clientconfig.AuthOptions(clientOpts)
@@ -228,12 +241,21 @@ func NewInstanceServiceFromCloud(cloud clientconfig.Cloud, cacert []byte) (*Inst
 		return nil, fmt.Errorf("Create ImageClient err: %v", err)
 	}
 
+	cloudConf := CloudConf{
+		IdentityEndpoint: opts.IdentityEndpoint,
+		Username:         opts.Username,
+		Password:         opts.Password,
+		TenantID:         opts.TenantID,
+		DomainName:       opts.DomainName,
+	}
+
 	return &InstanceService{
 		provider:       provider,
 		identityClient: identityClient,
 		computeClient:  serverClient,
 		networkClient:  networkingClient,
 		imagesClient:   imagesClient,
+		CloudConf:      cloudConf,
 	}, nil
 }
 
@@ -255,7 +277,8 @@ func (is *InstanceService) UpdateToken() error {
 	return nil
 }
 
-func (is *InstanceService) AssociateFloatingIP(instanceID, floatingIP string) error {
+func (is *InstanceService) AssociateFloatingIP(config *openstackconfigv1.OpenstackProviderSpec, instanceID, floatingIP string) error {
+
 	opts := floatingips.AssociateOpts{
 		FloatingIP: floatingIP,
 	}
@@ -329,16 +352,16 @@ func getSubnetsByFilter(networkClient *gophercloud.ServiceClient, opts *subnets.
 	return snets, nil
 }
 
-func CreatePort(is *InstanceService, name string, net ServerNetwork, securityGroups *[]string) (ports.Port, error) {
+func CreatePort(client *gophercloud.ServiceClient, name, fixedIP string, net ServerNetwork, securityGroups *[]string) (ports.Port, error) {
 	portCreateOpts := ports.CreateOpts{
 		Name:           name,
 		NetworkID:      net.networkID,
 		SecurityGroups: securityGroups,
 	}
 	if net.subnetID != "" {
-		portCreateOpts.FixedIPs = []ports.IP{{SubnetID: net.subnetID}}
+		portCreateOpts.FixedIPs = []ports.IP{{SubnetID: net.subnetID, IPAddress: fixedIP}}
 	}
-	newPort, err := ports.Create(is.networkClient, portCreateOpts).Extract()
+	newPort, err := ports.Create(client, portCreateOpts).Extract()
 	if err != nil {
 		return ports.Port{}, fmt.Errorf("Create port for server err: %v", err)
 	}
@@ -447,38 +470,11 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 		return nil, err
 	}
 	// Get all network UUIDs
-	var nets []ServerNetwork
-	for _, net := range config.Networks {
-		opts := networks.ListOpts(net.Filter)
-		opts.ID = net.UUID
-		ids, err := getNetworkIDsByFilter(is.networkClient, &opts)
-		if err != nil {
-			return nil, err
-		}
-		for _, netID := range ids {
-			if net.Subnets == nil {
-				nets = append(nets, ServerNetwork{
-					networkID: netID,
-				})
-			}
-
-			for _, snet := range net.Subnets {
-				sopts := subnets.ListOpts(snet.Filter)
-				sopts.ID = snet.UUID
-				sopts.NetworkID = netID
-				snets, err := getSubnetsByFilter(is.networkClient, &sopts)
-				if err != nil {
-					return nil, err
-				}
-				for _, snet := range snets {
-					nets = append(nets, ServerNetwork{
-						networkID: snet.NetworkID,
-						subnetID:  snet.ID,
-					})
-				}
-			}
-		}
+	nets, err := getServerNetworks(is, config.Networks)
+	if err != nil {
+		return nil, err
 	}
+
 	userData := base64.StdEncoding.EncodeToString([]byte(cmd))
 	var ports_list []servers.Network
 	for _, net := range nets {
@@ -499,7 +495,7 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 		var port ports.Port
 		if len(portList) == 0 {
 			// create server port
-			port, err = CreatePort(is, name, net, &securityGroups)
+			port, err = CreatePort(is.networkClient, name, "", net, &securityGroups)
 			if err != nil {
 				return nil, fmt.Errorf("Failed to create port err: %v", err)
 			}
@@ -611,6 +607,42 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 	}
 	is.computeClient.Microversion = ""
 	return serverToInstance(server), nil
+}
+
+func getServerNetworks(is *InstanceService, networkParams []providerv1.NetworkParam) ([]ServerNetwork, error) {
+	var nets []ServerNetwork
+	for _, net := range networkParams {
+		opts := networks.ListOpts(net.Filter)
+		opts.ID = net.UUID
+		ids, err := getNetworkIDsByFilter(is.networkClient, &opts)
+		if err != nil {
+			return nil, err
+		}
+		for _, netID := range ids {
+			if net.Subnets == nil {
+				nets = append(nets, ServerNetwork{
+					networkID: netID,
+				})
+			}
+
+			for _, snet := range net.Subnets {
+				sopts := subnets.ListOpts(snet.Filter)
+				sopts.ID = snet.UUID
+				sopts.NetworkID = netID
+				snets, err := getSubnetsByFilter(is.networkClient, &sopts)
+				if err != nil {
+					return nil, err
+				}
+				for _, snet := range snets {
+					nets = append(nets, ServerNetwork{
+						networkID: snet.NetworkID,
+						subnetID:  snet.ID,
+					})
+				}
+			}
+		}
+	}
+	return nets, nil
 }
 
 func (is *InstanceService) InstanceDelete(id string) error {

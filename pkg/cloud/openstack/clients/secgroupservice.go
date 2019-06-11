@@ -41,7 +41,7 @@ var defaultRules = []openstackconfigv1.SecurityGroupRule{
 		PortRangeMin:   0,
 		PortRangeMax:   0,
 		Protocol:       "",
-		RemoteIPPrefix: "",
+		RemoteIPPrefix: "0.0.0.0/0",
 	},
 	{
 		Direction:      "egress",
@@ -49,7 +49,7 @@ var defaultRules = []openstackconfigv1.SecurityGroupRule{
 		PortRangeMin:   0,
 		PortRangeMax:   0,
 		Protocol:       "",
-		RemoteIPPrefix: "",
+		RemoteIPPrefix: "::/0",
 	},
 }
 
@@ -151,21 +151,22 @@ func (s *SecGroupService) generateControlPlaneGroup(clusterName string) openstac
 		Name: secGroupName,
 		Rules: append(
 			[]openstackconfigv1.SecurityGroupRule{
-				{
+				{ // APIServer // TODO also for router ip
 					Direction:      "ingress",
 					EtherType:      "IPv4",
-					PortRangeMin:   443,
-					PortRangeMax:   443,
+					PortRangeMin:   6443,
+					PortRangeMax:   6443,
 					Protocol:       "tcp",
 					RemoteIPPrefix: "0.0.0.0/0",
+					//RemoteIPPrefix: "10.6.0.0/24", TODO as soon as LB is in place
 				},
-				{
+				{ // ETCD
 					Direction:      "ingress",
 					EtherType:      "IPv4",
-					PortRangeMin:   22,
-					PortRangeMax:   22,
+					PortRangeMin:   2379,
+					PortRangeMax:   2380,
 					Protocol:       "tcp",
-					RemoteIPPrefix: "0.0.0.0/0",
+					RemoteIPPrefix: "10.6.0.0/24",
 				},
 			},
 			defaultRules...,
@@ -176,34 +177,76 @@ func (s *SecGroupService) generateControlPlaneGroup(clusterName string) openstac
 func (s *SecGroupService) generateGlobalGroup(clusterName string) openstackconfigv1.SecurityGroup {
 	secGroupName := fmt.Sprintf("%s-cluster-%s-secgroup-%s", secGroupPrefix, clusterName, globalSuffix)
 
+	// TODO add vio5 new rules
 	// As above, hardcoded rules.
 	return openstackconfigv1.SecurityGroup{
 		Name: secGroupName,
 		Rules: append(
 			[]openstackconfigv1.SecurityGroupRule{
-				{
-					Direction:     "ingress",
-					EtherType:     "IPv4",
-					PortRangeMin:  1,
-					PortRangeMax:  65535,
-					Protocol:      "tcp",
-					RemoteGroupID: "self",
+				{ // ICMP
+					Direction:      "ingress",
+					EtherType:      "IPv4",
+					PortRangeMin:   0,
+					PortRangeMax:   0,
+					Protocol:       "icmp",
+					RemoteIPPrefix: "0.0.0.0/0",
 				},
-				{
-					Direction:     "ingress",
-					EtherType:     "IPv4",
-					PortRangeMin:  1,
-					PortRangeMax:  65535,
-					Protocol:      "udp",
-					RemoteGroupID: "self",
+				{ // ssh // TODO: Also for router ip
+					Direction:      "ingress",
+					EtherType:      "IPv4",
+					PortRangeMin:   22,
+					PortRangeMax:   22,
+					Protocol:       "tcp",
+					RemoteIPPrefix: "0.0.0.0/0",
+					//RemoteIPPrefix: "10.6.0.0/24", TODO as soon as LB is in place
 				},
-				{
-					Direction:     "ingress",
-					EtherType:     "IPv4",
-					PortRangeMin:  0,
-					PortRangeMax:  0,
-					Protocol:      "icmp",
-					RemoteGroupID: "self",
+				{ // Kubernetes Service Portrange // TODO: Also for router ip
+					Direction:      "ingress",
+					EtherType:      "IPv4",
+					PortRangeMin:   30000,
+					PortRangeMax:   42000,
+					Protocol:       "tcp",
+					RemoteIPPrefix: "10.6.0.0/24",
+				},
+				{ // Enable POD communication (TCP)
+					Direction:      "ingress",
+					EtherType:      "IPv4",
+					PortRangeMin:   1,
+					PortRangeMax:   65535,
+					Protocol:       "tcp",
+					RemoteIPPrefix: "10.6.0.0/16",
+				},
+				{ // Enable POD communication (UDP)
+					Direction:      "ingress",
+					EtherType:      "IPv4",
+					PortRangeMin:   1,
+					PortRangeMax:   65535,
+					Protocol:       "udp",
+					RemoteIPPrefix: "10.6.0.0/16",
+				},
+				{ // Kubernetes Metric Endpoint
+					Direction:      "ingress",
+					EtherType:      "IPv4",
+					PortRangeMin:   10250,
+					PortRangeMax:   10255,
+					Protocol:       "tcp",
+					RemoteIPPrefix: "10.6.0.0/24",
+				},
+				{ // CoreDNS
+					Direction:      "ingress",
+					EtherType:      "IPv4",
+					PortRangeMin:   53,
+					PortRangeMax:   53,
+					Protocol:       "tcp",
+					RemoteIPPrefix: "10.6.0.0/24",
+				},
+				{ // CoreDNS
+					Direction:      "ingress",
+					EtherType:      "IPv4",
+					PortRangeMin:   53,
+					PortRangeMax:   53,
+					Protocol:       "udp",
+					RemoteIPPrefix: "10.6.0.0/24",
 				},
 			},
 			defaultRules...,
@@ -241,6 +284,7 @@ func (s *SecGroupService) matchGroups(desired, observed *openstackconfigv1.Secur
 
 // reconcileGroup reconciles an already existing observed group by essentially emptying out all the rules and
 // recreating them.
+// TODO implement for zero-downtime. Re-creating all Rules interrupts traffic
 func (s *SecGroupService) reconcileGroup(desired, observed *openstackconfigv1.SecurityGroup) (*openstackconfigv1.SecurityGroup, error) {
 	klog.V(6).Infof("Deleting all rules for group %s", observed.Name)
 	for _, rule := range observed.Rules {

@@ -1,11 +1,14 @@
 package cluster
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
+	"k8s.io/apimachinery/pkg/types"
 	"net/http"
+	"reflect"
+	"sigs.k8s.io/controller-runtime/pkg/patch"
 
 	"gopkg.in/yaml.v2"
 
@@ -42,12 +45,24 @@ func NewActuator(params providerv1openstack.ActuatorParams) (*Actuator, error) {
 // Reconcile creates or applies updates to the cluster.
 func (a *Actuator) Reconcile(cluster *clusterv1.Cluster) error {
 	if cluster == nil {
-		return fmt.Errorf("The cluster is nil, check your cluster configuration")
+		return fmt.Errorf("the cluster is nil, check your cluster configuration")
 	}
+
+	// ClusterCopy is used for patch generation during storeCluster
+	clusterCopy := cluster.DeepCopy()
 
 	klog.Infof("Reconciling cluster %v.", cluster.Name)
 	clusterName := fmt.Sprintf("%s-%s", cluster.Namespace, cluster.Name)
 
+	clusterMachines, err := a.params.ClusterClient.Machines(cluster.Namespace).List(metav1.ListOptions{})
+	if err != nil {
+		return errors.Wrapf(err, "failed to retrieve machines in cluster %q", cluster.Name)
+	}
+
+	certificateService, err := clients.NewCertificateService()
+	if err != nil {
+		return err
+	}
 	client, err := a.getNetworkClient(cluster)
 	if err != nil {
 		return err
@@ -58,6 +73,11 @@ func (a *Actuator) Reconcile(cluster *clusterv1.Cluster) error {
 	}
 
 	secGroupService, err := clients.NewSecGroupService(client)
+	if err != nil {
+		return err
+	}
+
+	addonService, err := clients.NewAddonService()
 	if err != nil {
 		return err
 	}
@@ -74,7 +94,23 @@ func (a *Actuator) Reconcile(cluster *clusterv1.Cluster) error {
 		return errors.Errorf("failed to load cluster provider status: %v", err)
 	}
 
-	err = networkService.Reconcile(clusterName, *desired, status)
+	defer func() {
+		if err := a.storeCluster(cluster, clusterCopy, desired, status); err != nil {
+			klog.Errorf("failed to store provider status for cluster %q in namespace %q: %v", cluster.Name, cluster.Namespace, err)
+		}
+	}()
+
+	err = certificateService.ReconcileCertificates(clusterName, desired)
+	if err != nil {
+		return errors.Errorf("failed to reconcile certificates: %v", err)
+	}
+
+	err = networkService.ReconcileNetwork(clusterName, *desired, status)
+	if err != nil {
+		return errors.Errorf("failed to reconcile network: %v", err)
+	}
+
+	err = networkService.ReconcileLoadBalancers(clusterName, *desired, status, clusterMachines)
 	if err != nil {
 		return errors.Errorf("failed to reconcile network: %v", err)
 	}
@@ -83,11 +119,12 @@ func (a *Actuator) Reconcile(cluster *clusterv1.Cluster) error {
 	if err != nil {
 		return errors.Errorf("failed to reconcile security groups: %v", err)
 	}
-	defer func() {
-		if err := a.storeClusterStatus(cluster, status); err != nil {
-			klog.Errorf("failed to store provider status for cluster %q in namespace %q: %v", cluster.Name, cluster.Namespace, err)
-		}
-	}()
+
+	err = addonService.ReconcileAddons(cluster)
+	if err != nil {
+		return errors.Errorf("failed to reconcile addons: %v", err)
+	}
+
 	return nil
 }
 
@@ -142,16 +179,60 @@ func (a *Actuator) Delete(cluster *clusterv1.Cluster) error {
 	return nil
 }
 
-func (a *Actuator) storeClusterStatus(cluster *clusterv1.Cluster, status *providerv1.OpenstackClusterProviderStatus) error {
-	ext, err := providerv1.EncodeClusterStatus(status)
+func (a *Actuator) storeCluster(cluster *clusterv1.Cluster, clusterCopy *clusterv1.Cluster, spec *providerv1.OpenstackClusterProviderSpec, status *providerv1.OpenstackClusterProviderStatus) error {
+
+	ext, err := providerv1.EncodeClusterSpec(spec)
+	if err != nil {
+		return fmt.Errorf("failed to update cluster spec for cluster %q in namespace %q: %v", cluster.Name, cluster.Namespace, err)
+	}
+	newStatus, err := providerv1.EncodeClusterStatus(status)
 	if err != nil {
 		return fmt.Errorf("failed to update cluster status for cluster %q in namespace %q: %v", cluster.Name, cluster.Namespace, err)
 	}
-	cluster.Status.ProviderStatus = ext
 
-	statusClient := a.params.Client.Status()
-	if err := statusClient.Update(context.Background(), cluster); err != nil {
-		return fmt.Errorf("failed to update cluster status for cluster %q in namespace %q: %v", cluster.Name, cluster.Namespace, err)
+	cluster.Spec.ProviderSpec.Value = ext
+
+	// Build a patch and marshal that patch to something the client will understand.
+	p, err := patch.NewJSONPatch(clusterCopy, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to create new JSONPatch: %v", err)
+	}
+
+	clusterClient := a.params.ClusterClient.Clusters(cluster.Namespace)
+
+	// Do not update Cluster if nothing has changed
+	if len(p) != 0 {
+		pb, err := json.MarshalIndent(p, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to json marshal patch: %v", err)
+		}
+		klog.Infof("Patching cluster %s", cluster.Name)
+		result, err := clusterClient.Patch(cluster.Name, types.JSONPatchType, pb)
+		if err != nil {
+			return fmt.Errorf("failed to patch cluster: %v", err)
+		}
+		// Keep the resource version updated so the status update can succeed
+		cluster.ResourceVersion = result.ResourceVersion
+	}
+
+	// Check if API endpoints is not set or has changed.
+	// TOCLARIFY why append in aws instead of replace?
+	if cluster.Status.APIEndpoints == nil ||
+		(status.Network != nil && status.Network.APIServerLoadBalancer != nil && cluster.Status.APIEndpoints[0].Host != status.Network.APIServerLoadBalancer.IP) {
+		cluster.Status.APIEndpoints = []clusterv1.APIEndpoint{
+			{
+				Host: status.Network.APIServerLoadBalancer.IP,
+				Port: status.Network.APIServerLoadBalancer.Port,
+			},
+		}
+	}
+	cluster.Status.ProviderStatus = newStatus
+
+	if !reflect.DeepEqual(cluster.Status, clusterCopy.Status) {
+		klog.Infof("Updating cluster status %s", cluster.Name)
+		if _, err := clusterClient.UpdateStatus(cluster); err != nil {
+			return fmt.Errorf("failed to update cluster status: %v", err)
+		}
 	}
 
 	return nil
@@ -225,6 +306,9 @@ func (a *Actuator) getNetworkClient(cluster *clusterv1.Cluster) (*gophercloud.Se
 		clientOpts.AuthType = cloud.AuthType
 		clientOpts.Cloud = cloud.Cloud
 		clientOpts.RegionName = cloud.RegionName
+	} else {
+		clientOpts.Cloud = cluster.Name
+		cloud.Cloud = cluster.Name
 	}
 
 	opts, err = clientconfig.AuthOptions(clientOpts)

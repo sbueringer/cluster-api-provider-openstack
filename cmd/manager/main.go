@@ -18,7 +18,9 @@ package main
 
 import (
 	"flag"
+	"k8s.io/client-go/tools/clientcmd"
 	"log"
+	"os"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -27,7 +29,6 @@ import (
 	"sigs.k8s.io/cluster-api-provider-openstack/pkg/controller"
 	"sigs.k8s.io/cluster-api-provider-openstack/pkg/record"
 	clusterapis "sigs.k8s.io/cluster-api/pkg/apis"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/runtime/signals"
 )
@@ -53,6 +54,11 @@ func initLogs() {
 			f2.Value.Set(value)
 		}
 	})
+	vFlag := klogFlags.Lookup("v")
+	vFlag.Value.Set("4")
+
+	logtostderrFlag := klogFlags.Lookup("logtostderr")
+	logtostderrFlag.Value.Set("true")
 }
 
 func main() {
@@ -60,7 +66,12 @@ func main() {
 	initLogs()
 
 	// Get a config to talk to the apiserver
-	cfg, err := config.GetConfig()
+	// TODO upstream feature to specify context in sigs.k8s.io/controller-runtime/pkg/client/config/config.go
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		&clientcmd.ClientConfigLoadingRules{ExplicitPath: os.Getenv("KUBECONFIG")},
+		&clientcmd.ConfigOverrides{CurrentContext: os.Getenv("KUBECONTEXT")}).ClientConfig()
+
+	//cfg, err := config.GetConfig()
 	if err != nil {
 		klog.Fatal(err)
 	}

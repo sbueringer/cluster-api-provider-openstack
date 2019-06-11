@@ -19,10 +19,22 @@ package clients
 import (
 	"errors"
 	"fmt"
+	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/lbaas_v2/listeners"
+	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/lbaas_v2/monitors"
+	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/lbaas_v2/pools"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"sigs.k8s.io/cluster-api-provider-openstack/pkg/cloud/openstack"
+	clusterv1 "sigs.k8s.io/cluster-api/pkg/apis/cluster/v1alpha1"
+	"sigs.k8s.io/cluster-api/pkg/util"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/attributestags"
+	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/layer3/floatingips"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/layer3/routers"
+	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/lbaas_v2/loadbalancers"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/networks"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/subnets"
@@ -47,8 +59,7 @@ func NewNetworkService(client *gophercloud.ServiceClient) (*NetworkService, erro
 	}, nil
 }
 
-// Reconcile the Network for a given cluster
-func (s *NetworkService) Reconcile(clusterName string, desired openstackconfigv1.OpenstackClusterProviderSpec, status *openstackconfigv1.OpenstackClusterProviderStatus) error {
+func (s *NetworkService) ReconcileNetwork(clusterName string, desired openstackconfigv1.OpenstackClusterProviderSpec, status *openstackconfigv1.OpenstackClusterProviderStatus) error {
 	klog.Infof("Reconciling network components for cluster %s", clusterName)
 	if desired.NodeCIDR == "" {
 		klog.V(4).Infof("No need to reconcile network for cluster %s", clusterName)
@@ -77,16 +88,28 @@ func (s *NetworkService) Reconcile(clusterName string, desired openstackconfigv1
 	}
 	network.Subnet = &observedSubnet
 
-	observerdRouter, err := s.reconcileRouter(clusterName, networkName, desired, network)
+	observedRouter, err := s.reconcileRouter(clusterName, networkName, desired, network)
 	if err != nil {
 		return err
 	}
-	if observerdRouter.ID != "" {
+	if observedRouter.ID != "" {
 		// Only appending the router if it has an actual id
-		network.Router = &observerdRouter
+		network.Router = &observedRouter
 	} else {
 		status.Network.Router = nil
 	}
+
+	return nil
+}
+
+// Reconcile the Network for a given cluster
+func (s *NetworkService) ReconcileLoadBalancers(clusterName string, desired openstackconfigv1.OpenstackClusterProviderSpec, status *openstackconfigv1.OpenstackClusterProviderStatus, clusterMachines *clusterv1.MachineList) error {
+
+	apiServerLoadBalancer, err := s.reconcileLoadBalancer(clusterName, desired, status, clusterMachines)
+	if err != nil {
+		return err
+	}
+	status.Network.APIServerLoadBalancer = apiServerLoadBalancer
 
 	return nil
 }
@@ -226,7 +249,7 @@ func (s *NetworkService) reconcileRouter(clusterName, name string, desired opens
 		}
 		// only set the GatewayInfo right now when no externalIPs
 		// should be configured
-		if len(desired.ExternalFixedIPs) == 0 {
+		if len(desired.ExternalRouterIPs) == 0 {
 			opts.GatewayInfo = &routers.GatewayInfo{
 				NetworkID: desired.ExternalNetworkID,
 			}
@@ -240,15 +263,15 @@ func (s *NetworkService) reconcileRouter(clusterName, name string, desired opens
 		router = routerList[0]
 	}
 
-	if len(desired.ExternalFixedIPs) > 0 {
+	if len(desired.ExternalRouterIPs) > 0 {
 		var updateOpts routers.UpdateOpts
 		updateOpts.GatewayInfo = &routers.GatewayInfo{
 			NetworkID: desired.ExternalNetworkID,
 		}
-		for _, externalFixedIP := range desired.ExternalFixedIPs {
-			subnetID := externalFixedIP.Subnet.UUID
+		for _, externalRouterIP := range desired.ExternalRouterIPs {
+			subnetID := externalRouterIP.Subnet.UUID
 			if subnetID == "" {
-				sopts := subnets.ListOpts(externalFixedIP.Subnet.Filter)
+				sopts := subnets.ListOpts(externalRouterIP.Subnet.Filter)
 				snets, err := getSubnetsByFilter(s.client, &sopts)
 				if err != nil {
 					return emptyRouter, err
@@ -259,7 +282,7 @@ func (s *NetworkService) reconcileRouter(clusterName, name string, desired opens
 				subnetID = snets[0].ID
 			}
 			updateOpts.GatewayInfo.ExternalFixedIPs = append(updateOpts.GatewayInfo.ExternalFixedIPs, routers.ExternalFixedIP{
-				IPAddress: externalFixedIP.FixedIP,
+				IPAddress: externalRouterIP.FixedIP,
 				SubnetID:  subnetID,
 			})
 		}
@@ -314,6 +337,335 @@ INTERFACE_LOOP:
 	}
 
 	return observedRouter, nil
+}
+
+func (s *NetworkService) reconcileLoadBalancer(clusterName string, desired openstackconfigv1.OpenstackClusterProviderSpec, status *openstackconfigv1.OpenstackClusterProviderStatus, clusterMachines *clusterv1.MachineList) (*openstackconfigv1.LoadBalancer, error) {
+	klog.Info("Reconciling master load balancer")
+
+	// TODO add more check
+	if desired.ExternalNetworkID == "" {
+		klog.V(3).Info("No need to create floating ip, due to missing ExternalNetworkID")
+		return nil, nil
+	}
+	if desired.ExternalSubnetID == "" {
+		klog.V(3).Info("No need to create floating ip, due to missing ExternalSubnetID")
+		return nil, nil
+	}
+
+	split := strings.Split(desired.ClusterConfiguration.ControlPlaneEndpoint, ":")
+	if len(split) != 2 {
+		return nil, fmt.Errorf("format of ControlPlaneEndpoint is invalid")
+	}
+	port, err := strconv.Atoi(split[1])
+	if err != nil {
+		return nil, fmt.Errorf("error extracting port from controlPlaneEndpoint %s: %v", desired.ClusterConfiguration.ControlPlaneEndpoint, err)
+	}
+	observedLoadBalancer := &openstackconfigv1.LoadBalancer{
+		IP:   split[0],
+		Port: port,
+	}
+
+	const lbObjectsName = "kubeapi"
+
+	// lb
+	lb, err := checkIfLbExists(s.client, lbObjectsName)
+	if err != nil {
+		return nil, err
+	}
+	if lb == nil {
+		lbCreateOpts := loadbalancers.CreateOpts{
+			Name:        lbObjectsName,
+			VipSubnetID: status.Network.Subnet.ID,
+		}
+
+		lb, err = loadbalancers.Create(s.client, lbCreateOpts).Extract()
+		if err != nil {
+			return nil, fmt.Errorf("error create loadbalancer: %s", err)
+		}
+		err = waitForLoadBalancer(s.client, lb.ID, "ACTIVE")
+		if err != nil {
+			return nil, err
+		}
+	}
+	observedLoadBalancer.Name = lb.Name
+	observedLoadBalancer.ID = lb.ID
+	observedLoadBalancer.InternalIP = lb.VipAddress
+
+	// floatingip
+	fp, err := checkIfFloatingIPExists(s.client, observedLoadBalancer.IP)
+	if err != nil {
+		return nil, err
+	}
+	if fp == nil {
+		fpCreateOpts := &floatingips.CreateOpts{
+			FloatingIP:        observedLoadBalancer.IP,
+			FloatingNetworkID: desired.ExternalNetworkID,
+			PortID:            lb.VipPortID,
+		}
+		fp, err := floatingips.Create(s.client, fpCreateOpts).Extract()
+		if err != nil {
+			return nil, fmt.Errorf("error allocating floating IP: %s", err)
+		}
+		err = waitForFloatingIP(s.client, fp.ID, "ACTIVE")
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// lb_listener
+	for _, port := range []int{22, 6443} {
+		lbPortObjectsName := fmt.Sprintf("%s-%d", lbObjectsName, port)
+
+		listener, err := checkIfListenerExists(s.client, lbPortObjectsName)
+		if err != nil {
+			return nil, err
+		}
+		if listener == nil {
+			listenerCreateOpts := listeners.CreateOpts{
+				Name:           lbPortObjectsName,
+				Protocol:       "TCP",
+				ProtocolPort:   port,
+				LoadbalancerID: lb.ID,
+				//DefaultPoolID:          d.Get("default_pool_id").(string), TODO check vio4/5
+			}
+			listener, err = listeners.Create(s.client, listenerCreateOpts).Extract()
+			if err != nil {
+				return nil, fmt.Errorf("error creating listener: %s", err)
+			}
+			err = waitForLoadBalancer(s.client, lb.ID, "ACTIVE")
+			if err != nil {
+				return nil, err
+			}
+			err = waitForListener(s.client, listener.ID, "ACTIVE")
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// lb_pool
+		pool, err := checkIfPoolExists(s.client, lbPortObjectsName)
+		if err != nil {
+			return nil, err
+		}
+		if pool == nil {
+			poolCreateOpts := pools.CreateOpts{
+				Name:       lbPortObjectsName,
+				Protocol:   "TCP",
+				LBMethod:   pools.LBMethodRoundRobin,
+				ListenerID: listener.ID,
+			}
+			pool, err = pools.Create(s.client, poolCreateOpts).Extract()
+			if err != nil {
+				return nil, fmt.Errorf("error creating pool: %s", err)
+			}
+			err = waitForLoadBalancer(s.client, lb.ID, "ACTIVE")
+			if err != nil {
+				return nil, err
+			}
+		}
+		observedLoadBalancer.PoolID = pool.ID
+
+		// lb_monitor
+		monitor, err := checkIfMonitorExists(s.client, lbPortObjectsName)
+		if err != nil {
+			return nil, err
+		}
+		if monitor == nil {
+			monitorCreateOpts := monitors.CreateOpts{
+				Name:       lbPortObjectsName,
+				PoolID:     pool.ID,
+				Type:       "TCP",
+				Delay:      30,
+				Timeout:    5,
+				MaxRetries: 3,
+			}
+			_, err = monitors.Create(s.client, monitorCreateOpts).Extract()
+			if err != nil {
+				return nil, fmt.Errorf("error creating monitor: %s", err)
+			}
+			err = waitForLoadBalancer(s.client, lb.ID, "ACTIVE")
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		for _, m := range clusterMachines.Items {
+			if util.IsControlPlaneMachine(&m) {
+				err = createLBMember(s.client, &m, lbPortObjectsName+"-"+m.Name, lb.ID, pool.ID, status.Network.Subnet.ID, port)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	return observedLoadBalancer, nil
+}
+
+func createLBMember(networkClient *gophercloud.ServiceClient, machine *clusterv1.Machine, name, lbID, poolID, subnetID string, port int) error {
+
+	lbMember, err := checkIfLbMemberExists(networkClient, poolID, name)
+	if err != nil {
+		return err
+	}
+	if lbMember == nil {
+
+		ip, ok := machine.ObjectMeta.Annotations[openstack.OpenstackIPAnnotationKey]
+		if !ok {
+			return fmt.Errorf("no ip found on annotation %s on machine %s", openstack.OpenstackIPAnnotationKey, machine.Name)
+		}
+
+		lbMemberOpts := pools.CreateMemberOpts{
+			Name:         name,
+			ProtocolPort: port,
+			Address:      ip,
+			SubnetID:     subnetID,
+		}
+
+		err = waitForLoadBalancer(networkClient, lbID, "ACTIVE")
+		if err != nil {
+			return err
+		}
+		lbMember, err = pools.CreateMember(networkClient, poolID, lbMemberOpts).Extract()
+		if err != nil {
+			return fmt.Errorf("error create lbmember: %s", err)
+		}
+		err = waitForLoadBalancer(networkClient, lbID, "ACTIVE")
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkIfLbExists(networkingClient *gophercloud.ServiceClient, name string) (*loadbalancers.LoadBalancer, error) {
+	allPages, err := loadbalancers.List(networkingClient, loadbalancers.ListOpts{Name: name}).AllPages()
+	if err != nil {
+		return nil, err
+	}
+	lbList, err := loadbalancers.ExtractLoadBalancers(allPages)
+	if err != nil {
+		return nil, err
+	}
+	if len(lbList) == 0 {
+		return nil, nil
+	}
+	return &lbList[0], nil
+}
+
+func checkIfFloatingIPExists(networkingClient *gophercloud.ServiceClient, ip string) (*floatingips.FloatingIP, error) {
+	allPages, err := floatingips.List(networkingClient, floatingips.ListOpts{FloatingIP: ip}).AllPages()
+	if err != nil {
+		return nil, err
+	}
+	fpList, err := floatingips.ExtractFloatingIPs(allPages)
+	if err != nil {
+		return nil, err
+	}
+	if len(fpList) == 0 {
+		return nil, nil
+	}
+	return &fpList[0], nil
+}
+
+func checkIfListenerExists(networkingClient *gophercloud.ServiceClient, name string) (*listeners.Listener, error) {
+	allPages, err := listeners.List(networkingClient, listeners.ListOpts{Name: name}).AllPages()
+	if err != nil {
+		return nil, err
+	}
+	listenerList, err := listeners.ExtractListeners(allPages)
+	if err != nil {
+		return nil, err
+	}
+	if len(listenerList) == 0 {
+		return nil, nil
+	}
+	return &listenerList[0], nil
+}
+
+func checkIfPoolExists(networkingClient *gophercloud.ServiceClient, name string) (*pools.Pool, error) {
+	allPages, err := pools.List(networkingClient, pools.ListOpts{Name: name}).AllPages()
+	if err != nil {
+		return nil, err
+	}
+	poolList, err := pools.ExtractPools(allPages)
+	if err != nil {
+		return nil, err
+	}
+	if len(poolList) == 0 {
+		return nil, nil
+	}
+	return &poolList[0], nil
+}
+
+func checkIfMonitorExists(networkingClient *gophercloud.ServiceClient, name string) (*monitors.Monitor, error) {
+	allPages, err := monitors.List(networkingClient, monitors.ListOpts{Name: name}).AllPages()
+	if err != nil {
+		return nil, err
+	}
+	monitorList, err := monitors.ExtractMonitors(allPages)
+	if err != nil {
+		return nil, err
+	}
+	if len(monitorList) == 0 {
+		return nil, nil
+	}
+	return &monitorList[0], nil
+}
+
+func checkIfLbMemberExists(networkingClient *gophercloud.ServiceClient, poolID, name string) (*pools.Member, error) {
+	allPages, err := pools.ListMembers(networkingClient, poolID, pools.ListMembersOpts{Name: name}).AllPages()
+	if err != nil {
+		return nil, err
+	}
+	lbMemberList, err := pools.ExtractMembers(allPages)
+	if err != nil {
+		return nil, err
+	}
+	if len(lbMemberList) == 0 {
+		return nil, nil
+	}
+	return &lbMemberList[0], nil
+}
+
+var backoff = wait.Backoff{
+	Steps:    10,
+	Duration: 30 * time.Second,
+	Factor:   1.0,
+	Jitter:   0.1,
+}
+
+func waitForLoadBalancer(networkingClient *gophercloud.ServiceClient, id, target string) error {
+	klog.Infof("Waiting for loadbalancer %s to become %s.", id, target)
+	return wait.ExponentialBackoff(backoff, func() (bool, error) {
+		lb, err := loadbalancers.Get(networkingClient, id).Extract()
+		if err != nil {
+			return false, err
+		}
+		return lb.ProvisioningStatus == target, nil
+	})
+}
+
+func waitForFloatingIP(networkingClient *gophercloud.ServiceClient, id, target string) error {
+	klog.Infof("Waiting for floatingip %s to become %s.", id, target)
+	return wait.ExponentialBackoff(backoff, func() (bool, error) {
+		fp, err := floatingips.Get(networkingClient, id).Extract()
+		if err != nil {
+			return false, err
+		}
+		return fp.Status == target, nil
+	})
+}
+
+func waitForListener(networkingClient *gophercloud.ServiceClient, id, target string) error {
+	klog.Infof("Waiting for listener %s to become %s.", id, target)
+	return wait.ExponentialBackoff(backoff, func() (bool, error) {
+		_, err := listeners.Get(networkingClient, id).Extract()
+		if err != nil {
+			return false, err
+		}
+		// The listener resource has no Status attribute, so a successful Get is the best we can do
+		return true, nil
+	})
 }
 
 func (s *NetworkService) getRouterInterfaces(routerID string) ([]ports.Port, error) {

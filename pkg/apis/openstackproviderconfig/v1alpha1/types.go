@@ -19,6 +19,8 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	kubeadmv1beta1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta1"
 )
 
 // +genclient
@@ -82,6 +84,21 @@ type OpenstackProviderSpec struct {
 
 	// The volume metadata to boot from
 	RootVolume *RootVolume `json:"rootVolume,omitempty"`
+
+	// KubeadmConfiguration holds the kubeadm configuration options
+	// +optional
+	KubeadmConfiguration KubeadmConfiguration `json:"kubeadmConfiguration,omitempty"`
+}
+
+// KubeadmConfiguration holds the various configurations that kubeadm uses
+type KubeadmConfiguration struct {
+	// JoinConfiguration is used to customize any kubeadm join configuration
+	// parameters.
+	Join kubeadmv1beta1.JoinConfiguration `json:"join,omitempty"`
+
+	// InitConfiguration is used to customize any kubeadm init configuration
+	// parameters.
+	Init kubeadmv1beta1.InitConfiguration `json:"init,omitempty"`
 }
 
 type SecurityGroupParam struct {
@@ -202,10 +219,13 @@ type OpenstackClusterProviderSpec struct {
 	// ExternalNetworkID is the ID of an external OpenStack Network. This is necessary
 	// to get public internet to the VMs.
 	ExternalNetworkID string `json:"externalNetworkId,omitempty"`
+	// ExternalSubnetID is the ID of an external OpenStack Subnet. This is necessary
+	// to create the FloatingIP for the KubernetesAPIServer
+	ExternalSubnetID string `json:"externalSubnetID,omitempty"`
 
-	// ExternalFixedIPs is an array of externalIPs on the respective subnets.
+	// ExternalRouterIPs is an array of externalIPs on the respective subnets.
 	// This is necessary if the router needs a fixed ip in a specific subnet.
-	ExternalFixedIPs []ExternalFixedIPParam `json:"externalFixedIPs,omitempty"`
+	ExternalRouterIPs []ExternalRouterIPParam `json:"externalRouterIPs,omitempty"`
 
 	// ManagedSecurityGroups defines that kubernetes manages the OpenStack security groups
 	// for now, that means that we'll create two security groups, one allowing SSH
@@ -218,9 +238,37 @@ type OpenstackClusterProviderSpec struct {
 
 	// Default: True. In case of server tag errors, set to False
 	DisableServerTags bool `json:"disableServerTags,omitempty"`
+
+	// CAKeyPair is the key pair for ca certs.
+	CAKeyPair KeyPair `json:"caKeyPair,omitempty"`
+
+	//EtcdCAKeyPair is the key pair for etcd.
+	EtcdCAKeyPair KeyPair `json:"etcdCAKeyPair,omitempty"`
+
+	// FrontProxyCAKeyPair is the key pair for FrontProxyKeyPair.
+	FrontProxyCAKeyPair KeyPair `json:"frontProxyCAKeyPair,omitempty"`
+
+	// SAKeyPair is the service account key pair.
+	SAKeyPair KeyPair `json:"saKeyPair,omitempty"`
+
+	// ClusterConfiguration holds the cluster-wide information used during a
+	// kubeadm init call.
+	ClusterConfiguration kubeadmv1beta1.ClusterConfiguration `json:"clusterConfiguration,omitempty"`
 }
 
-type ExternalFixedIPParam struct {
+// KeyPair is how operators can supply custom keypairs for kubeadm to use.
+type KeyPair struct {
+	// base64 encoded cert and key
+	Cert []byte `json:"cert"`
+	Key  []byte `json:"key"`
+}
+
+// HasCertAndKey returns whether a keypair contains cert and key of non-zero length.
+func (kp *KeyPair) HasCertAndKey() bool {
+	return len(kp.Cert) != 0 && len(kp.Key) != 0
+}
+
+type ExternalRouterIPParam struct {
 	// The FixedIP in the corresponding subnet
 	FixedIP string `json:"fixedIP,omitempty"`
 	// The subnet in which the FixedIP is used for the Gateway of this router
@@ -258,6 +306,8 @@ type Network struct {
 
 	Subnet *Subnet `json:"subnet,omitempty"`
 	Router *Router `json:"router,omitempty"`
+
+	APIServerLoadBalancer *LoadBalancer `json:"apiServerLoadBalancer,omitempty"`
 }
 
 // Subnet represents basic information about the associated OpenStack Neutron Subnet
@@ -272,6 +322,16 @@ type Subnet struct {
 type Router struct {
 	Name string `json:"name"`
 	ID   string `json:"id"`
+}
+
+// Router represents basic information about the associated OpenStack Neutron Router
+type LoadBalancer struct {
+	Name       string `json:"name"`
+	ID         string `json:"id"`
+	IP         string `json:"ip"`
+	InternalIP string `json:"internalIP"`
+	Port       int    `json:"port"`
+	PoolID     string `json:"poolID"`
 }
 
 func init() {
