@@ -114,6 +114,16 @@ func (s *NetworkService) ReconcileLoadBalancers(clusterName string, desired open
 	return nil
 }
 
+type createOpts struct {
+	AdminStateUp        *bool  `json:"admin_state_up,omitempty"`
+	Name                string `json:"name,omitempty"`
+	PortSecurityEnabled *bool  `json:"port_security_enabled,omitempty"`
+}
+
+func (c createOpts) ToNetworkCreateMap() (map[string]interface{}, error) {
+	return gophercloud.BuildRequestBody(c, "network")
+}
+
 func (s *NetworkService) reconcileNetwork(clusterName, networkName string, desired openstackconfigv1.OpenstackClusterProviderSpec) (openstackconfigv1.Network, error) {
 	klog.Infof("Reconciling network %s", networkName)
 	emptyNetwork := openstackconfigv1.Network{}
@@ -130,11 +140,13 @@ func (s *NetworkService) reconcileNetwork(clusterName, networkName string, desir
 		}, nil
 	}
 
-	opts := networks.CreateOpts{
-		AdminStateUp: gophercloud.Enabled,
-		Name:         networkName,
+	createOpts := createOpts{
+		AdminStateUp:        gophercloud.Enabled,
+		Name:                networkName,
+		PortSecurityEnabled: gophercloud.Disabled,
 	}
-	network, err := networks.Create(s.client, opts).Extract()
+
+	network, err := networks.Create(s.client, createOpts).Extract()
 	if err != nil {
 		return emptyNetwork, err
 	}
@@ -339,6 +351,8 @@ INTERFACE_LOOP:
 	return observedRouter, nil
 }
 
+const kubeapiLBObjectsName = "kubeapi"
+
 func (s *NetworkService) reconcileLoadBalancer(clusterName string, desired openstackconfigv1.OpenstackClusterProviderSpec, status *openstackconfigv1.OpenstackClusterProviderStatus, clusterMachines *clusterv1.MachineList) (*openstackconfigv1.LoadBalancer, error) {
 	klog.Info("Reconciling master load balancer")
 
@@ -365,16 +379,14 @@ func (s *NetworkService) reconcileLoadBalancer(clusterName string, desired opens
 		Port: port,
 	}
 
-	const lbObjectsName = "kubeapi"
-
 	// lb
-	lb, err := checkIfLbExists(s.client, lbObjectsName)
+	lb, err := checkIfLbExists(s.client, kubeapiLBObjectsName)
 	if err != nil {
 		return nil, err
 	}
 	if lb == nil {
 		lbCreateOpts := loadbalancers.CreateOpts{
-			Name:        lbObjectsName,
+			Name:        kubeapiLBObjectsName,
 			VipSubnetID: status.Network.Subnet.ID,
 		}
 
@@ -414,7 +426,7 @@ func (s *NetworkService) reconcileLoadBalancer(clusterName string, desired opens
 
 	// lb_listener
 	for _, port := range []int{22, 6443} {
-		lbPortObjectsName := fmt.Sprintf("%s-%d", lbObjectsName, port)
+		lbPortObjectsName := fmt.Sprintf("%s-%d", kubeapiLBObjectsName, port)
 
 		listener, err := checkIfListenerExists(s.client, lbPortObjectsName)
 		if err != nil {
@@ -488,32 +500,62 @@ func (s *NetworkService) reconcileLoadBalancer(clusterName string, desired opens
 				return nil, err
 			}
 		}
-
-		for _, m := range clusterMachines.Items {
-			if util.IsControlPlaneMachine(&m) {
-				err = createLBMember(s.client, &m, lbPortObjectsName+"-"+m.Name, lb.ID, pool.ID, status.Network.Subnet.ID, port)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
 	}
 	return observedLoadBalancer, nil
 }
 
-func createLBMember(networkClient *gophercloud.ServiceClient, machine *clusterv1.Machine, name, lbID, poolID, subnetID string, port int) error {
+func (s *NetworkService) CreateLBMember(networkClient *gophercloud.ServiceClient, machine *clusterv1.Machine, providerStatus *openstackconfigv1.OpenstackClusterProviderStatus) error {
 
-	lbMember, err := checkIfLbMemberExists(networkClient, poolID, name)
-	if err != nil {
-		return err
+	if !util.IsControlPlaneMachine(machine) {
+		return nil
 	}
-	if lbMember == nil {
+
+	lbID := providerStatus.Network.APIServerLoadBalancer.ID
+	subnetID := providerStatus.Network.Subnet.ID
+
+	for _, port := range []int{22, 6443} {
+		lbPortObjectsName := fmt.Sprintf("%s-%d", kubeapiLBObjectsName, port)
+		name := lbPortObjectsName + "-" + machine.Name
+
+		pool, err := checkIfPoolExists(s.client, lbPortObjectsName)
+		if err != nil {
+			return err
+		}
 
 		ip, ok := machine.ObjectMeta.Annotations[openstack.OpenstackIPAnnotationKey]
 		if !ok {
-			return fmt.Errorf("no ip found on annotation %s on machine %s", openstack.OpenstackIPAnnotationKey, machine.Name)
+			klog.Infof("no ip found yet on annotation %s on machine %s", openstack.OpenstackIPAnnotationKey, machine.Name)
+			return nil
 		}
 
+		lbMember, err := checkIfLbMemberExists(networkClient, pool.ID, name)
+		if err != nil {
+			return err
+		}
+
+		if lbMember != nil {
+			// check if we have to recreate the LB
+			if lbMember.Address == ip {
+				// nothing to do return
+				return nil
+			}
+
+			// lb member changed so let's delete it so we can create it again with the correct IP
+			err = waitForLoadBalancer(networkClient, lbID, "ACTIVE")
+			if err != nil {
+				return err
+			}
+			err = pools.DeleteMember(networkClient, pool.ID, lbMember.ID).ExtractErr()
+			if err != nil {
+				return fmt.Errorf("error deleting lbmember: %s", err)
+			}
+			err = waitForLoadBalancer(networkClient, lbID, "ACTIVE")
+			if err != nil {
+				return err
+			}
+		}
+
+		// if we got to this point we should either create or re-create the lb member
 		lbMemberOpts := pools.CreateMemberOpts{
 			Name:         name,
 			ProtocolPort: port,
@@ -525,13 +567,56 @@ func createLBMember(networkClient *gophercloud.ServiceClient, machine *clusterv1
 		if err != nil {
 			return err
 		}
-		lbMember, err = pools.CreateMember(networkClient, poolID, lbMemberOpts).Extract()
+		lbMember, err = pools.CreateMember(networkClient, pool.ID, lbMemberOpts).Extract()
 		if err != nil {
 			return fmt.Errorf("error create lbmember: %s", err)
 		}
 		err = waitForLoadBalancer(networkClient, lbID, "ACTIVE")
 		if err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (s *NetworkService) DeleteLBMember(networkClient *gophercloud.ServiceClient, machine *clusterv1.Machine, providerStatus *openstackconfigv1.OpenstackClusterProviderStatus) error {
+
+	if !util.IsControlPlaneMachine(machine) {
+		return nil
+	}
+
+	lbID := providerStatus.Network.APIServerLoadBalancer.ID
+
+	for _, port := range []int{22, 6443} {
+		lbPortObjectsName := fmt.Sprintf("%s-%d", kubeapiLBObjectsName, port)
+		name := lbPortObjectsName + "-" + machine.Name
+
+		pool, err := checkIfPoolExists(s.client, lbPortObjectsName)
+		if err != nil {
+			return err
+		}
+
+
+		lbMember, err := checkIfLbMemberExists(networkClient, pool.ID, name)
+		if err != nil {
+			return err
+		}
+
+		if lbMember != nil {
+
+			// lb member changed so let's delete it so we can create it again with the correct IP
+			err = waitForLoadBalancer(networkClient, lbID, "ACTIVE")
+			if err != nil {
+				return err
+			}
+			err = pools.DeleteMember(networkClient, pool.ID, lbMember.ID).ExtractErr()
+			if err != nil {
+				return fmt.Errorf("error deleting lbmember: %s", err)
+			}
+			err = waitForLoadBalancer(networkClient, lbID, "ACTIVE")
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil

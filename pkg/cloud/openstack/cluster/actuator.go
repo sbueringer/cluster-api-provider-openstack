@@ -120,7 +120,7 @@ func (a *Actuator) Reconcile(cluster *clusterv1.Cluster) error {
 		return errors.Errorf("failed to reconcile security groups: %v", err)
 	}
 
-	err = addonService.ReconcileAddons(cluster)
+	err = addonService.ReconcileAddons(cluster, desired, status)
 	if err != nil {
 		return errors.Errorf("failed to reconcile addons: %v", err)
 	}
@@ -217,8 +217,8 @@ func (a *Actuator) storeCluster(cluster *clusterv1.Cluster, clusterCopy *cluster
 
 	// Check if API endpoints is not set or has changed.
 	// TOCLARIFY why append in aws instead of replace?
-	if cluster.Status.APIEndpoints == nil ||
-		(status.Network != nil && status.Network.APIServerLoadBalancer != nil && cluster.Status.APIEndpoints[0].Host != status.Network.APIServerLoadBalancer.IP) {
+	if status.Network != nil && status.Network.APIServerLoadBalancer != nil &&
+		(cluster.Status.APIEndpoints == nil || cluster.Status.APIEndpoints[0].Host != status.Network.APIServerLoadBalancer.IP) {
 		cluster.Status.APIEndpoints = []clusterv1.APIEndpoint{
 			{
 				Host: status.Network.APIServerLoadBalancer.IP,

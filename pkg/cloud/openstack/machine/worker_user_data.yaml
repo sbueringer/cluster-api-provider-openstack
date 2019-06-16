@@ -1,4 +1,5 @@
-
+locksmith:
+  reboot_strategy: "off"
 storage:
   directories:
     - path: /opt
@@ -72,6 +73,22 @@ storage:
           tar xvf "/tmp/kubeadm.tar.gz" -C /opt/bin
           rm "/tmp/kubeadm.tar.gz"
       mode: 0755
+      user:
+        id: 0
+      group:
+        id: 0
+    - path: /etc/docker/daemon.json
+      contents:
+        inline: |
+          {
+            "exec-opts": ["native.cgroupdriver=systemd"],
+            "iptables": false,
+            "ip-masq": false,
+            "log-driver": "journald",
+            "storage-driver": "overlay2"
+          }
+      filesystem: root
+      mode: 420
       user:
         id: 0
       group:
@@ -153,6 +170,8 @@ systemd:
         Type=oneshot
         Environment="PATH=/usr/bin:/usr/sbin:/opt/bin:/opt/cni/bin:/bin/sbin/opt/bin"
         ExecStartPre=/opt/bin/download-binaries.sh
+        # load br_netfilter module, because docker doesn't do it when iptables=false
+        ExecStartPre=/sbin/modprobe br_netfilter
         ExecStart=/opt/bin/kubeadm join --config /etc/kubernetes/kubeadm_config.yaml
         ExecStartPost=/opt/bin/kubectl --kubeconfig /etc/kubernetes/kubelet.conf annotate --overwrite node %H machine={{ .Machine.ObjectMeta.Namespace }}/{{ .Machine.ObjectMeta.Name }}
         ExecStartPost=/usr/bin/systemctl disable kubeadm.service
@@ -162,5 +181,3 @@ systemd:
       enabled: true
       name: kubeadm.service
 
-locksmith:
-  reboot_strategy: "off"

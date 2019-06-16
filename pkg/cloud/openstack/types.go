@@ -24,6 +24,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+type ActuatorConfig struct {
+	UserDataControlPlane  string
+	UserDataWorker        string
+	UserDataPostprocessor string
+}
+
 // ActuatorParams holds parameter information for Actuator
 type ActuatorParams struct {
 	KubeClient    kubernetes.Interface
@@ -31,4 +37,5 @@ type ActuatorParams struct {
 	ClusterClient clusterclient.ClusterV1alpha1Interface
 	EventRecorder record.EventRecorder
 	Scheme        *runtime.Scheme
+	Config        ActuatorConfig
 }

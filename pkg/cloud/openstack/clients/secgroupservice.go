@@ -74,8 +74,8 @@ func (s *SecGroupService) Reconcile(clusterName string, desired openstackconfigv
 		return nil
 	}
 	desiredSecGroups := map[string]openstackconfigv1.SecurityGroup{
-		"controlplane": s.generateControlPlaneGroup(clusterName),
-		"global":       s.generateGlobalGroup(clusterName),
+		"controlplane": s.generateControlPlaneGroup(clusterName, desired.NodeCIDR, desired.ExternalRouterIPs),
+		"global":       s.generateGlobalGroup(clusterName, desired.NodeCIDR, desired.ExternalRouterIPs),
 	}
 	observedSecGroups := make(map[string]*openstackconfigv1.SecurityGroup)
 
@@ -142,23 +142,23 @@ func (s *SecGroupService) exists(groupID string) (bool, error) {
 	return true, nil
 }
 
-func (s *SecGroupService) generateControlPlaneGroup(clusterName string) openstackconfigv1.SecurityGroup {
+// TODO make this configurable
+func (s *SecGroupService) generateControlPlaneGroup(clusterName, nodeCIDR string, externalRouterIPs []openstackconfigv1.ExternalRouterIPParam) openstackconfigv1.SecurityGroup {
 	secGroupName := fmt.Sprintf("%s-cluster-%s-secgroup-%s", secGroupPrefix, clusterName, controlPlaneSuffix)
 
 	// Hardcoded rules for now, we might want to make this definable in the Spec but it's more
 	// likely that the infrastructure plan in cluster-api will have taken form by then.
-	return openstackconfigv1.SecurityGroup{
+	res := openstackconfigv1.SecurityGroup{
 		Name: secGroupName,
 		Rules: append(
 			[]openstackconfigv1.SecurityGroupRule{
-				{ // APIServer // TODO also for router ip
+				{ // APIServer
 					Direction:      "ingress",
 					EtherType:      "IPv4",
 					PortRangeMin:   6443,
 					PortRangeMax:   6443,
 					Protocol:       "tcp",
-					RemoteIPPrefix: "0.0.0.0/0",
-					//RemoteIPPrefix: "10.6.0.0/24", TODO as soon as LB is in place
+					RemoteIPPrefix: nodeCIDR,
 				},
 				{ // ETCD
 					Direction:      "ingress",
@@ -166,20 +166,30 @@ func (s *SecGroupService) generateControlPlaneGroup(clusterName string) openstac
 					PortRangeMin:   2379,
 					PortRangeMax:   2380,
 					Protocol:       "tcp",
-					RemoteIPPrefix: "10.6.0.0/24",
+					RemoteIPPrefix: nodeCIDR,
 				},
 			},
 			defaultRules...,
 		),
 	}
+	for _, externalRouterIP := range externalRouterIPs {
+		res.Rules = append(res.Rules, openstackconfigv1.SecurityGroupRule{
+			Direction:      "ingress",
+			EtherType:      "IPv4",
+			PortRangeMin:   6443,
+			PortRangeMax:   6443,
+			Protocol:       "tcp",
+			RemoteIPPrefix: fmt.Sprintf("%s/32", externalRouterIP.FixedIP),
+		})
+	}
+	return res
 }
 
-func (s *SecGroupService) generateGlobalGroup(clusterName string) openstackconfigv1.SecurityGroup {
+// TODO make this configurable ("10.6.0.0/16" PodRange is hardcoded here)
+func (s *SecGroupService) generateGlobalGroup(clusterName, nodeCIDR string, externalRouterIPs []openstackconfigv1.ExternalRouterIPParam) openstackconfigv1.SecurityGroup {
 	secGroupName := fmt.Sprintf("%s-cluster-%s-secgroup-%s", secGroupPrefix, clusterName, globalSuffix)
 
-	// TODO add vio5 new rules
-	// As above, hardcoded rules.
-	return openstackconfigv1.SecurityGroup{
+	res := openstackconfigv1.SecurityGroup{
 		Name: secGroupName,
 		Rules: append(
 			[]openstackconfigv1.SecurityGroupRule{
@@ -191,22 +201,21 @@ func (s *SecGroupService) generateGlobalGroup(clusterName string) openstackconfi
 					Protocol:       "icmp",
 					RemoteIPPrefix: "0.0.0.0/0",
 				},
-				{ // ssh // TODO: Also for router ip
+				{ // ssh
 					Direction:      "ingress",
 					EtherType:      "IPv4",
 					PortRangeMin:   22,
 					PortRangeMax:   22,
 					Protocol:       "tcp",
-					RemoteIPPrefix: "0.0.0.0/0",
-					//RemoteIPPrefix: "10.6.0.0/24", TODO as soon as LB is in place
+					RemoteIPPrefix: nodeCIDR,
 				},
-				{ // Kubernetes Service Portrange // TODO: Also for router ip
+				{ // Kubernetes Service Portrange
 					Direction:      "ingress",
 					EtherType:      "IPv4",
 					PortRangeMin:   30000,
 					PortRangeMax:   42000,
 					Protocol:       "tcp",
-					RemoteIPPrefix: "10.6.0.0/24",
+					RemoteIPPrefix: nodeCIDR,
 				},
 				{ // Enable POD communication (TCP)
 					Direction:      "ingress",
@@ -230,7 +239,7 @@ func (s *SecGroupService) generateGlobalGroup(clusterName string) openstackconfi
 					PortRangeMin:   10250,
 					PortRangeMax:   10255,
 					Protocol:       "tcp",
-					RemoteIPPrefix: "10.6.0.0/24",
+					RemoteIPPrefix: nodeCIDR,
 				},
 				{ // CoreDNS
 					Direction:      "ingress",
@@ -238,7 +247,7 @@ func (s *SecGroupService) generateGlobalGroup(clusterName string) openstackconfi
 					PortRangeMin:   53,
 					PortRangeMax:   53,
 					Protocol:       "tcp",
-					RemoteIPPrefix: "10.6.0.0/24",
+					RemoteIPPrefix: nodeCIDR,
 				},
 				{ // CoreDNS
 					Direction:      "ingress",
@@ -246,12 +255,33 @@ func (s *SecGroupService) generateGlobalGroup(clusterName string) openstackconfi
 					PortRangeMin:   53,
 					PortRangeMax:   53,
 					Protocol:       "udp",
-					RemoteIPPrefix: "10.6.0.0/24",
+					RemoteIPPrefix: nodeCIDR,
 				},
 			},
 			defaultRules...,
 		),
 	}
+	for _, externalRouterIP := range externalRouterIPs {
+		res.Rules = append(res.Rules, []openstackconfigv1.SecurityGroupRule{
+			{ // ssh
+				Direction:      "ingress",
+				EtherType:      "IPv4",
+				PortRangeMin:   22,
+				PortRangeMax:   22,
+				Protocol:       "tcp",
+				RemoteIPPrefix: fmt.Sprintf("%s/32", externalRouterIP.FixedIP),
+			},
+			{ // Kubernetes Service Portrange
+				Direction:      "ingress",
+				EtherType:      "IPv4",
+				PortRangeMin:   30000,
+				PortRangeMax:   42000,
+				Protocol:       "tcp",
+				RemoteIPPrefix: fmt.Sprintf("%s/32", externalRouterIP.FixedIP),
+			},
+		}...)
+	}
+	return res
 }
 
 // matchGroups will check if security groups match.

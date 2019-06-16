@@ -77,6 +77,22 @@ storage:
         id: 0
       group:
         id: 0
+    - path: /etc/docker/daemon.json
+      contents:
+        inline: |
+          {
+            "exec-opts": ["native.cgroupdriver=systemd"],
+            "iptables": false,
+            "ip-masq": false,
+            "log-driver": "journald",
+            "storage-driver": "overlay2"
+          }
+      filesystem: root
+      mode: 420
+      user:
+        id: 0
+      group:
+        id: 0
     - path: /etc/kubernetes/cloud.conf
       filesystem: root
       contents:
@@ -175,7 +191,9 @@ systemd:
         Environment="PATH=/usr/bin:/usr/sbin:/opt/bin:/opt/cni/bin:/bin/sbin/opt/bin"
         ExecStartPre=/opt/bin/download-binaries.sh
         ExecStartPre=/opt/bin/prepare.sh
-        ExecStart=/opt/bin/kubeadm init --config /etc/kubernetes/kubeadm_config.yaml
+        # load br_netfilter module, because docker doesn't do it when iptables=false
+        ExecStartPre=/sbin/modprobe br_netfilter
+        ExecStart=/opt/bin/kubeadm init --skip-phases=addon --config /etc/kubernetes/kubeadm_config.yaml
         ExecStartPost=/opt/bin/kubectl --kubeconfig /etc/kubernetes/kubelet.conf annotate --overwrite node %H machine={{ .Machine.ObjectMeta.Namespace }}/{{ .Machine.ObjectMeta.Name }}
         ExecStartPost=/usr/bin/systemctl disable kubeadm.service
 

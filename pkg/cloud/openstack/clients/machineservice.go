@@ -70,7 +70,7 @@ type InstanceService struct {
 	provider       *gophercloud.ProviderClient
 	computeClient  *gophercloud.ServiceClient
 	identityClient *gophercloud.ServiceClient
-	networkClient  *gophercloud.ServiceClient
+	NetworkClient  *gophercloud.ServiceClient
 	imagesClient   *gophercloud.ServiceClient
 	CloudConf      CloudConf
 }
@@ -253,7 +253,7 @@ func NewInstanceServiceFromCloud(cloud clientconfig.Cloud, clusterName string, c
 		provider:       provider,
 		identityClient: identityClient,
 		computeClient:  serverClient,
-		networkClient:  networkingClient,
+		NetworkClient:  networkingClient,
 		imagesClient:   imagesClient,
 		CloudConf:      cloudConf,
 	}, nil
@@ -380,13 +380,15 @@ func isDuplicate(list []string, name string) bool {
 	return false
 }
 
+// TODO: I think this should fail if we resolve no security groups for a given filter
+// If not it get's unsecure if somebody has a typo in the configuration
 func GetSecurityGroups(is *InstanceService, sg_param []openstackconfigv1.SecurityGroupParam) ([]string, error) {
 	var sgIDs []string
 	for _, sg := range sg_param {
 		listOpts := groups.ListOpts(sg.Filter)
 		listOpts.Name = sg.Name
 		listOpts.ID = sg.UUID
-		pages, err := groups.List(is.networkClient, listOpts).AllPages()
+		pages, err := groups.List(is.NetworkClient, listOpts).AllPages()
 		if err != nil {
 			return nil, err
 		}
@@ -481,7 +483,7 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 		if net.networkID == "" {
 			return nil, fmt.Errorf("No network was found or provided. Please check your machine configuration and try again")
 		}
-		allPages, err := ports.List(is.networkClient, ports.ListOpts{
+		allPages, err := ports.List(is.NetworkClient, ports.ListOpts{
 			Name:      name,
 			NetworkID: net.networkID,
 		}).AllPages()
@@ -495,7 +497,7 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 		var port ports.Port
 		if len(portList) == 0 {
 			// create server port
-			port, err = CreatePort(is.networkClient, name, "", net, &securityGroups)
+			port, err = CreatePort(is.NetworkClient, name, "", net, &securityGroups)
 			if err != nil {
 				return nil, fmt.Errorf("Failed to create port err: %v", err)
 			}
@@ -503,7 +505,7 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 			port = portList[0]
 		}
 
-		_, err = attributestags.ReplaceAll(is.networkClient, "ports", port.ID, attributestags.ReplaceAllOpts{
+		_, err = attributestags.ReplaceAll(is.NetworkClient, "ports", port.ID, attributestags.ReplaceAllOpts{
 			Tags: machineTags}).Extract()
 		if err != nil {
 			return nil, fmt.Errorf("Tagging port for server err: %v", err)
@@ -513,7 +515,7 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 		})
 
 		if config.Trunk == true {
-			allPages, err := trunks.List(is.networkClient, trunks.ListOpts{
+			allPages, err := trunks.List(is.NetworkClient, trunks.ListOpts{
 				Name:   name,
 				PortID: port.ID,
 			}).AllPages()
@@ -531,7 +533,7 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 					Name:   name,
 					PortID: port.ID,
 				}
-				newTrunk, err := trunks.Create(is.networkClient, trunkCreateOpts).Extract()
+				newTrunk, err := trunks.Create(is.NetworkClient, trunkCreateOpts).Extract()
 				if err != nil {
 					return nil, fmt.Errorf("Create trunk for server err: %v", err)
 				}
@@ -540,7 +542,7 @@ func (is *InstanceService) InstanceCreate(clusterName string, name string, clust
 				trunk = trunkList[0]
 			}
 
-			_, err = attributestags.ReplaceAll(is.networkClient, "trunks", trunk.ID, attributestags.ReplaceAllOpts{
+			_, err = attributestags.ReplaceAll(is.NetworkClient, "trunks", trunk.ID, attributestags.ReplaceAllOpts{
 				Tags: machineTags}).Extract()
 			if err != nil {
 				return nil, fmt.Errorf("Tagging trunk for server err: %v", err)
@@ -614,7 +616,7 @@ func getServerNetworks(is *InstanceService, networkParams []providerv1.NetworkPa
 	for _, net := range networkParams {
 		opts := networks.ListOpts(net.Filter)
 		opts.ID = net.UUID
-		ids, err := getNetworkIDsByFilter(is.networkClient, &opts)
+		ids, err := getNetworkIDsByFilter(is.NetworkClient, &opts)
 		if err != nil {
 			return nil, err
 		}
@@ -629,7 +631,7 @@ func getServerNetworks(is *InstanceService, networkParams []providerv1.NetworkPa
 				sopts := subnets.ListOpts(snet.Filter)
 				sopts.ID = snet.UUID
 				sopts.NetworkID = netID
-				snets, err := getSubnetsByFilter(is.networkClient, &sopts)
+				snets, err := getSubnetsByFilter(is.NetworkClient, &sopts)
 				if err != nil {
 					return nil, err
 				}
@@ -673,7 +675,7 @@ func (is *InstanceService) InstanceDelete(id string) error {
 			listOpts := trunks.ListOpts{
 				PortID: port.PortID,
 			}
-			allTrunks, err := trunks.List(is.networkClient, listOpts).AllPages()
+			allTrunks, err := trunks.List(is.NetworkClient, listOpts).AllPages()
 			if err != nil {
 				return err
 			}
@@ -683,7 +685,7 @@ func (is *InstanceService) InstanceDelete(id string) error {
 			}
 			if len(trunkInfo) == 1 {
 				err = util.PollImmediate(RetryIntervalTrunkDelete, TimeoutTrunkDelete, func() (bool, error) {
-					err := trunks.Delete(is.networkClient, trunkInfo[0].ID).ExtractErr()
+					err := trunks.Delete(is.NetworkClient, trunkInfo[0].ID).ExtractErr()
 					if err != nil {
 						return false, nil
 					}
@@ -697,7 +699,7 @@ func (is *InstanceService) InstanceDelete(id string) error {
 
 		// delete port
 		err = util.PollImmediate(RetryIntervalPortDelete, TimeoutPortDelete, func() (bool, error) {
-			err := ports.Delete(is.networkClient, port.PortID).ExtractErr()
+			err := ports.Delete(is.NetworkClient, port.PortID).ExtractErr()
 			if err != nil {
 				return false, nil
 			}
@@ -713,7 +715,7 @@ func (is *InstanceService) InstanceDelete(id string) error {
 }
 
 func GetTrunkSupport(is *InstanceService) (bool, error) {
-	allPages, err := netext.List(is.networkClient).AllPages()
+	allPages, err := netext.List(is.NetworkClient).AllPages()
 	if err != nil {
 		return false, err
 	}

@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"log"
 	"os"
+	"sigs.k8s.io/cluster-api-provider-openstack/pkg/cloud/openstack"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -34,6 +35,10 @@ import (
 )
 
 var logFlushFreq = flag.Duration("log-flush-frequency", 5*time.Second, "Maximum number of seconds between log flushes")
+
+var userDataControlPlane = flag.String("user-data-control-plane", "", "if set, the given file is used as user data for the control plane nodes")
+var userDataWorker = flag.String("user-data-worker", "", "if set, the given file is used as user data for the worker nodes")
+var userDataPostprocessor = flag.String("user-data-postprocessor", "", "postprocessor to user for the user data")
 
 func initLogs() {
 
@@ -93,6 +98,12 @@ func main() {
 	if err := clusterapis.AddToScheme(mgr.GetScheme()); err != nil {
 		klog.Fatal(err)
 	}
+
+	controller.SetConfig(openstack.ActuatorConfig{
+		UserDataControlPlane:  *userDataControlPlane,
+		UserDataWorker:        *userDataWorker,
+		UserDataPostprocessor: *userDataPostprocessor,
+	})
 
 	// Setup all Controllers
 	if err := controller.AddToManager(mgr); err != nil {

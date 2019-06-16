@@ -2,6 +2,7 @@ package clients
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/pkg/errors"
@@ -18,11 +19,14 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog"
 	"os"
-	"path"
+	"path/filepath"
 	"reflect"
+	providerv1 "sigs.k8s.io/cluster-api-provider-openstack/pkg/apis/openstackproviderconfig/v1alpha1"
 	clusterv1 "sigs.k8s.io/cluster-api/pkg/apis/cluster/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"strings"
+	"text/template"
 )
 
 func init() {
@@ -38,14 +42,10 @@ func NewAddonService() (*AddonService, error) {
 	return &AddonService{}, nil
 }
 
-var addonResources = []string{
-	"calico.yaml",
-}
-
-var basePath = "/home/fedora/code/gopath/src/sigs.k8s.io/cluster-api-provider-openstack/pkg/cloud/openstack/clients/addons"
+var basePath = "/home/fedora/code/gopath/src/github.com/sbueringer/clusterapi-setup/deploy/addons/files"
 
 // ReconcileCertificates generate certificates if none exists.
-func (s *AddonService) ReconcileAddons(cluster *clusterv1.Cluster) error {
+func (s *AddonService) ReconcileAddons(cluster *clusterv1.Cluster, providerSpec *providerv1.OpenstackClusterProviderSpec, providerStatus *providerv1.OpenstackClusterProviderStatus, ) error {
 
 	cfg, err := NewKubeconfig(cluster)
 	if err != nil {
@@ -54,20 +54,22 @@ func (s *AddonService) ReconcileAddons(cluster *clusterv1.Cluster) error {
 
 	mgr, err := manager.New(cfg, manager.Options{})
 	if err != nil {
-		return fmt.Errorf("Unable to create manager for restConfig: %v", err)
+		return fmt.Errorf("unable to create manager for restConfig: %v", err)
 	}
 
-	for _, k8sFile := range addonResources {
-		err = applyK8sResourcesFromYaml(mgr.GetClient(), path.Join(basePath, k8sFile))
-		if err != nil {
-			return fmt.Errorf("cannot apply objects from file %s: %v", k8sFile, err)
+	return filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
+		if !info.IsDir() && strings.HasSuffix(path, ".yaml") {
+			err = applyK8sResourcesFromYaml(cluster, providerSpec, providerStatus, mgr.GetClient(), path)
+			if err != nil {
+				klog.Warningf("cannot apply objects from file %s: %v\n", path, err)
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // applyK8sResourcesFromYaml runs applyK8sResource() for each k8s object of a multi-document yaml
-func applyK8sResourcesFromYaml(kubeClient client.Client, filename string) error {
+func applyK8sResourcesFromYaml(cluster *clusterv1.Cluster, providerSpec *providerv1.OpenstackClusterProviderSpec, providerStatus *providerv1.OpenstackClusterProviderStatus, kubeClient client.Client, filename string) error {
 
 	file, err := os.Open(filename)
 	if err != nil {
@@ -88,7 +90,12 @@ func applyK8sResourcesFromYaml(kubeClient client.Client, filename string) error 
 			break
 		}
 
-		k8sObject, _, err := scheme.Codecs.UniversalDeserializer().Decode(b, nil, nil)
+		templatedObject, err := applyTemplate(cluster, providerSpec, providerStatus, string(b))
+		if err != nil {
+			return err
+		}
+
+		k8sObject, _, err := scheme.Codecs.UniversalDeserializer().Decode([]byte(templatedObject), nil, nil)
 		if err != nil {
 			fmt.Printf("unable to deserialize YAML file: %v", err)
 		}
@@ -99,6 +106,28 @@ func applyK8sResourcesFromYaml(kubeClient client.Client, filename string) error 
 		}
 	}
 	return nil
+}
+
+type params struct {
+	Cluster        *clusterv1.Cluster
+	ProviderSpec   *providerv1.OpenstackClusterProviderSpec
+	ProviderStatus *providerv1.OpenstackClusterProviderStatus
+}
+
+func applyTemplate(cluster *clusterv1.Cluster, providerSpec *providerv1.OpenstackClusterProviderSpec, providerStatus *providerv1.OpenstackClusterProviderStatus, object string) (string, error) {
+	params := params{
+		Cluster:        cluster,
+		ProviderSpec:   providerSpec,
+		ProviderStatus: providerStatus,
+	}
+
+	startUpScript := template.Must(template.New("object").Parse(object))
+
+	var buf bytes.Buffer
+	if err := startUpScript.Execute(&buf, params); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 // applyK8sResource applies a k8s resource with 10 retries

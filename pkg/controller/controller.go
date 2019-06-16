@@ -25,6 +25,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
+var cfg openstack.ActuatorConfig
+
+func SetConfig(c openstack.ActuatorConfig) {
+	cfg = c
+}
+
 // AddToManagerFuncs is a list of functions to add all Controllers to the Manager
 var AddToManagerFuncs []func(manager.Manager) error
 
@@ -58,6 +64,7 @@ func getActuatorParams(mgr manager.Manager) openstack.ActuatorParams {
 		ClusterClient: cs.ClusterV1alpha1(),
 		Scheme:        mgr.GetScheme(),
 		EventRecorder: mgr.GetRecorder("openstack-controller"),
+		Config:        cfg,
 	}
 
 }
