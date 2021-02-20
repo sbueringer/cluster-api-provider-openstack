@@ -64,7 +64,7 @@ func (s *Service) ReconcileLoadBalancer(clusterName string, openStackCluster *in
 		return err
 	}
 
-	if !openStackCluster.Spec.UseOctavia {
+	if !openStackCluster.Spec.UseOctavia && openStackCluster.Spec.ManagedSecurityGroups{
 		err := s.assignNeutronLbaasAPISecGroup(clusterName, lb)
 		if err != nil {
 			return err
@@ -217,6 +217,7 @@ func (s *Service) ReconcileLoadBalancerMember(clusterName string, machine *clust
 	s.logger.Info("Reconciling loadbalancer", "name", loadBalancerName)
 
 	lbID := openStackCluster.Status.Network.APIServerLoadBalancer.ID
+	subnetID := openStackCluster.Status.Network.Subnet.ID
 	portList := []int{int(openStackCluster.Spec.ControlPlaneEndpoint.Port)}
 	portList = append(portList, openStackCluster.Spec.APIServerLoadBalancerAdditionalPorts...)
 	for _, port := range portList {
@@ -267,6 +268,7 @@ func (s *Service) ReconcileLoadBalancerMember(clusterName string, machine *clust
 			Name:         name,
 			ProtocolPort: port,
 			Address:      ip,
+			SubnetID:     subnetID,
 		}
 
 		if err := waitForLoadBalancerActive(s.logger, s.loadbalancerClient, lbID); err != nil {
