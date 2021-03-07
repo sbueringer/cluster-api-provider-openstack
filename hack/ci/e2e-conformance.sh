@@ -34,13 +34,14 @@ OPENSTACK_BASTION_MACHINE_FLAVOR=${OPENSTACK_BASTION_MACHINE_FLAVOR:-"m1.tiny"}
 OPENSTACK_CLUSTER_TEMPLATE=${OPENSTACK_CLUSTER_TEMPLATE:-"./templates/cluster-template.yaml"}
 CLUSTER_NAME=${CLUSTER_NAME:-"capi-quickstart"}
 OPENSTACK_SSH_KEY_NAME=${OPENSTACK_SSH_KEY_NAME:-"${CLUSTER_NAME}-key"}
-KUBERNETES_VERSION=${KUBERNETES_VERSION:-"v1.19.7"}
+KUBERNETES_VERSION=${KUBERNETES_VERSION:-"v1.20.4"}
 USE_CI_ARTIFACTS=${USE_CI_ARTIFACTS:-"true"}
 IMAGE_REPOSITORY=${IMAGE_REPOSITORY:-"k8s.gcr.io"}
 
 ARTIFACTS="${ARTIFACTS:-${PWD}/_artifacts}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 
+LOGS_DEVSTACK_DUMPED=false
 LOGS_MGMT_DUMPED=false
 LOGS_CAPO_DUMPED=false
 
@@ -76,7 +77,7 @@ dump_kind_logs() {
   fi
   LOGS_MGMT_DUMPED=true
 
-  iptables -t nat -L --line-numbers
+  iptables -t nat -L --line-numbers || true
 
   echo "Dump logs"
   mkdir -p "${ARTIFACTS}/logs/mgmt"

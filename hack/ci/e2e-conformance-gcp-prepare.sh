@@ -126,7 +126,13 @@ main() {
   # Install some local deps we later need in the meantime (we have to wait for cloud init anyway)
   if ! command -v sshuttle;
   then
-    pip3 install sshuttle
+    # Install sshuttle from source because we need: https://github.com/sshuttle/sshuttle/pull/606
+    # TODO(sbueringer) install via pip after the next release after 1.0.5 via:
+    # pip3 install sshuttle
+    cd /tmp
+    git clone https://github.com/sshuttle/sshuttle.git
+    cd sshuttle
+    sudo ./setup.py install
   fi
   if ! command -v openstack;
   then
@@ -145,18 +151,9 @@ main() {
   PUBLIC_IP=$(gcloud compute instances describe openstack --project "${GCP_PROJECT}" --zone "${GCP_ZONE}" --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
   PRIVATE_IP=$(gcloud compute instances describe openstack --project "${GCP_PROJECT}" --zone "${GCP_ZONE}" --format='get(networkInterfaces[0].networkIP)')
   echo "Opening tunnel to ${PRIVATE_IP} via ${PUBLIC_IP}"
-  sshuttle -r "${PUBLIC_IP}" "${PRIVATE_IP}/32" 172.24.4.0/24 --ssh-cmd='ssh -i ~/.ssh/google_compute_engine -o "StrictHostKeyChecking no" -o "UserKnownHostsFile=/dev/null" -o "IdentitiesOnly=yes"' -l 0.0.0.0 &
-  # sshuttle has a weird hack which drops all packets with TTL 63.
-  # Unfortunately our packets from kind have TTL 63. As they only
-  # need this hack for sshuttle running on client *and* server
-  # it should be safe for us to just delete the rule. For reference:
-  # https://github.com/sshuttle/sshuttle/blob/7fc33c00201b483f75d3ca9817001fc095f23d2f/sshuttle/methods/nft.py#L51-L54
-  # TODO(sbueringer): remove this hack and replace with a configured ttl as soon
-  # as a sshuttle version with this PR is available: https://github.com/sshuttle/sshuttle/pull/606
-  retry 12 5 "iptables -t nat -L sshuttle-12300 1 --line-numbers | grep TTL"
-  iptables -t nat -L --line-numbers
-  iptables -t nat -D sshuttle-12300 1
-  iptables -t nat -L --line-numbers
+  # Packets from the Prow Pod or the Pods in Kind have TTL 63 or 64.
+  # We need a ttl of 65 (default 63), so all of our packets are captured by sshuttle.
+  sshuttle -r "${PUBLIC_IP}" "${PRIVATE_IP}/32" 172.24.4.0/24 --ttl=65 --ssh-cmd='ssh -i ~/.ssh/google_compute_engine -o "StrictHostKeyChecking no" -o "UserKnownHostsFile=/dev/null" -o "IdentitiesOnly=yes"' -l 0.0.0.0 -D
 
   export OS_REGION_NAME=RegionOne
   export OS_PROJECT_DOMAIN_ID=default
