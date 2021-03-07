@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2019 The Kubernetes Authors.
+# Copyright 2021 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,11 +18,13 @@
 
 set -o errexit -o nounset -o pipefail
 
+CLUSTER_NAME=${CLUSTER_NAME:-"capi-quickstart"}
 GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-""}
 GCP_PROJECT=${GCP_PROJECT:-""}
 GCP_REGION=${GCP_REGION:-"us-east4"}
 GCP_ZONE=${GCP_ZONE:-"us-east4-a"}
-CLUSTER_NAME=${CLUSTER_NAME:-"capi-quickstart"}
+GCP_MACHINE_MIN_CPU_PLATFORM=${GCP_MACHINE_MIN_CPU_PLATFORM:-"Intel Cascade Lake"}
+GCP_MACHINE_TYPE=${GCP_MACHINE_TYPE:-"n2-standard-16"}
 GCP_NETWORK_NAME=${GCP_NETWORK_NAME:-"${CLUSTER_NAME}-mynetwork"}
 
 echo "Using: GCP_PROJECT: ${GCP_PROJECT} GCP_REGION: ${GCP_REGION} GCP_NETWORK_NAME: ${GCP_NETWORK_NAME}"
@@ -44,16 +46,11 @@ function retry {
   return 1
 }
 
-# FIXME: make commented out (for Prow) stuff configurable
-
 function init_networks() {
   if [[ ${GCP_NETWORK_NAME} != "default" ]]; then
     if ! gcloud compute networks describe "${GCP_NETWORK_NAME}" --project "${GCP_PROJECT}" > /dev/null;
     then
       gcloud compute networks create --project "$GCP_PROJECT" "${GCP_NETWORK_NAME}" --subnet-mode auto --quiet
-      #gcloud compute networks create --project "$GCP_PROJECT" "${GCP_NETWORK_NAME}" --subnet-mode custom --quiet
-      #gcloud compute networks subnets create "${GCP_NETWORK_NAME}" --network="${GCP_NETWORK_NAME}" \
-      #  --range="10.156.0.0/20" --region="${GCP_REGION}"
       gcloud compute firewall-rules create "${GCP_NETWORK_NAME}"-allow-http --project "$GCP_PROJECT" \
         --allow tcp:80 --network "${GCP_NETWORK_NAME}" --quiet
       gcloud compute firewall-rules create "${GCP_NETWORK_NAME}"-allow-https --project "$GCP_PROJECT" \
@@ -120,8 +117,8 @@ main() {
       --boot-disk-type pd-ssd \
       --can-ip-forward \
       --tags http-server,https-server,novnc,openstack-apis \
-      --min-cpu-platform "Intel Cascade Lake" \
-      --machine-type n2-standard-16 \
+      --min-cpu-platform "${GCP_MACHINE_MIN_CPU_PLATFORM}" \
+      --machine-type "${GCP_MACHINE_TYPE}" \
       --network-interface=network="${CLUSTER_NAME}-mynetwork,subnet=${CLUSTER_NAME}-mynetwork,aliases=/24" \
       --metadata-from-file user-data=./hack/ci/e2e-conformance-gcp-cloud-init.yaml
   fi

@@ -44,6 +44,28 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 LOGS_MGMT_DUMPED=false
 LOGS_CAPO_DUMPED=false
 
+dump_devstack_logs() {
+  set -x
+
+  if [[ "${LOGS_DEVSTACK_DUMPED}" == "true" ]];
+  then
+    echo "mgmt logs already dumped"
+    return 0
+  fi
+  LOGS_DEVSTACK_DUMPED=true
+
+  echo "Dump logs"
+  dir="${ARTIFACTS}/logs/devstack"
+  mkdir -p "${dir}"
+
+  # e.g.: http://10.150.0.2/identity => 10.150.0.2
+  DEVSTACK_IP=$(echo "$CAPO_AUTH_URL" | awk -F[/:] '{print $4}')
+  scp -i ~/.ssh/google_compute_engine \
+    -o "StrictHostKeyChecking no" -o "UserKnownHostsFile=/dev/null" -o "IdentitiesOnly=yes" \
+    -r "root@${DEVSTACK_IP}:/var/log/cloud-init.log" "root@${DEVSTACK_IP}:/var/log/cloud-init-output.log" \
+    "${dir}" || true
+}
+
 dump_kind_logs() {
   set -x
 
@@ -54,7 +76,6 @@ dump_kind_logs() {
   fi
   LOGS_MGMT_DUMPED=true
 
-  # FIXME: for debugging
   iptables -t nat -L --line-numbers
 
   echo "Dump logs"
@@ -80,13 +101,6 @@ dump_kind_logs() {
   # dump cluster info for mgmt
   kubectl cluster-info dump > "${ARTIFACTS}/logs/mgmt/cluster.txt" || true
   kubectl get secrets -o yaml -A > "${ARTIFACTS}/logs/mgmt/cluster-secrets.txt" || true
-
-  # shellcheck disable=SC2024
-  journalctl --output=short-precise -k -b all > "${ARTIFACTS}/logs/mgmt/kernel.log" || true
-  # shellcheck disable=SC2024
-  journalctl --output=short-precise > "${ARTIFACTS}/logs/mgmt/systemd.log" || true
-  # shellcheck disable=SC2024
-  last -x > "${ARTIFACTS}/logs/mgmt/last-x.txt" || true
 
   # export all logs from kind
   kind export logs --name="clusterapi" "${ARTIFACTS}/logs/mgmt" || true
@@ -172,6 +186,7 @@ EOF
 }
 
 function dump_logs() {
+  dump_devstack_logs
   dump_kind_logs
   dump_workload_logs
 }
@@ -186,7 +201,7 @@ create_key_pair() {
     ssh-keygen -t rsa -f "/tmp/${OPENSTACK_SSH_KEY_NAME}.pem"  -N ""
     chmod 0400 "/tmp/${OPENSTACK_SSH_KEY_NAME}.pem"
   fi
-  OPENSTACK_SSH_KEY_PUBLIC=$(cat /tmp/${OPENSTACK_SSH_KEY_NAME}.pem.pub)
+  OPENSTACK_SSH_KEY_PUBLIC=$(cat "/tmp/${OPENSTACK_SSH_KEY_NAME}.pem.pub")
 
   if ! openstack keypair show "${OPENSTACK_SSH_KEY_NAME}";
   then
@@ -227,7 +242,10 @@ upload_image(){
 }
 
 install_prereqs() {
-  apt-get update && apt-get install -y jq
+  if ! command -v jq;
+  then
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y jq
+  fi
 
 	GO111MODULE=on go get github.com/mikefarah/yq/v2
 	go get -u github.com/go-bindata/go-bindata/...
@@ -529,6 +547,7 @@ main() {
   fi
   
   # exports the b64 env vars used below
+  # We also need CAPO_AUTH_URL to get files from the devstack later
   source "${REPO_ROOT}"/templates/env.rc "${OPENSTACK_CLOUD_YAML_FILE}" "${CLUSTER_NAME}"
   cp "${OPENSTACK_CLOUD_YAML_FILE}" ./
   export OS_CLOUD=${CLUSTER_NAME}  
