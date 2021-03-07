@@ -78,6 +78,9 @@ if [ -n "${BOSKOS_HOST:-}" ]; then
   HEART_BEAT_PID=$!
 fi
 
+make docker-build
+exit 0
+
 hack/ci/e2e-conformance-gcp-prepare.sh
 
 export ARTIFACTS
