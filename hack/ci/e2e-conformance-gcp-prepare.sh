@@ -132,7 +132,7 @@ main() {
     cd /tmp
     git clone https://github.com/sshuttle/sshuttle.git
     cd sshuttle
-    sudo ./setup.py install
+    ./setup.py install
   fi
   if ! command -v openstack;
   then
