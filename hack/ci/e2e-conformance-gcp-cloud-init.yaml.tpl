@@ -20,21 +20,21 @@ write_files:
       sudo modprobe kvm-intel
 
       # from https://raw.githubusercontent.com/openstack/octavia/master/devstack/contrib/new-octavia-devstack.sh
-      git clone -b stable/victoria https://github.com/openstack/devstack.git /tmp/devstack
+      git clone -b stable/${OPENSTACK_RELEASE} https://github.com/openstack/devstack.git /tmp/devstack
 
       cat <<EOF > /tmp/devstack/localrc
       GIT_BASE=https://github.com
 
       # Neutron
-      enable_plugin neutron https://github.com/openstack/neutron stable/victoria
+      enable_plugin neutron https://github.com/openstack/neutron stable/${OPENSTACK_RELEASE}
 
       # Octavia
-      enable_plugin octavia https://github.com/openstack/octavia stable/victoria
-      enable_plugin octavia-dashboard https://github.com/openstack/octavia-dashboard stable/victoria
+      enable_plugin octavia https://github.com/openstack/octavia stable/${OPENSTACK_RELEASE}
+      enable_plugin octavia-dashboard https://github.com/openstack/octavia-dashboard stable/${OPENSTACK_RELEASE}
       #LIBS_FROM_GIT+=python-octaviaclient
 
       # Cinder
-      enable_plugin cinderlib https://github.com/openstack/cinderlib stable/victoria
+      enable_plugin cinderlib https://github.com/openstack/cinderlib stable/${OPENSTACK_RELEASE}
 
       KEYSTONE_TOKEN_FORMAT=fernet
 

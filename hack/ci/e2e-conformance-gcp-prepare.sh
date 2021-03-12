@@ -26,6 +26,7 @@ GCP_ZONE=${GCP_ZONE:-"us-east4-a"}
 GCP_MACHINE_MIN_CPU_PLATFORM=${GCP_MACHINE_MIN_CPU_PLATFORM:-"Intel Cascade Lake"}
 GCP_MACHINE_TYPE=${GCP_MACHINE_TYPE:-"n2-standard-16"}
 GCP_NETWORK_NAME=${GCP_NETWORK_NAME:-"${CLUSTER_NAME}-mynetwork"}
+OPENSTACK_RELEASE=${OPENSTACK_RELEASE:-"victoria"}
 
 echo "Using: GCP_PROJECT: ${GCP_PROJECT} GCP_REGION: ${GCP_REGION} GCP_NETWORK_NAME: ${GCP_NETWORK_NAME}"
 
@@ -109,6 +110,10 @@ main() {
 
   if ! gcloud compute instances describe openstack --project "${GCP_PROJECT}" --zone "${GCP_ZONE}" > /dev/null;
   then
+    	< ./hack/ci/e2e-conformance-gcp-cloud-init.yaml.tpl \
+	  sed "s|\${OPENSTACK_RELEASE}|${OPENSTACK_RELEASE}|" \
+	   > ./hack/ci/e2e-conformance-gcp-cloud-init.yaml
+
     gcloud compute instances create openstack \
       --project "${GCP_PROJECT}" \
       --zone "${GCP_ZONE}" \
@@ -183,7 +188,7 @@ main() {
   openstack flavor delete m1.tiny
   openstack flavor create --ram 512 --disk 1 --vcpus 1 --public --id 1 m1.tiny --property hw_rng:allowed='True'
   openstack flavor delete m1.small
-  openstack flavor create --ram 4096 --disk 10 --vcpus 2 --public --id 2 m1.small --property hw_rng:allowed='True'
+  openstack flavor create --ram 6144 --disk 10 --vcpus 2 --public --id 2 m1.small --property hw_rng:allowed='True'
   openstack flavor delete m1.medium
   openstack flavor create --ram 6144 --disk 10 --vcpus 4 --public --id 3 m1.medium --property hw_rng:allowed='True'
 
