@@ -83,7 +83,7 @@ hack/ci/e2e-conformance-gcp-prepare.sh
 export ARTIFACTS
 export OPENSTACK_DNS_NAMESERVERS=8.8.8.8
 export CONTROL_PLANE_MACHINE_COUNT=1
-export WORKER_MACHINE_COUNT=5
+export WORKER_MACHINE_COUNT=4
 hack/ci/e2e-conformance.sh --run-tests-parallel --verbose $*
 test_status="${?}"
 
