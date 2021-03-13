@@ -269,6 +269,7 @@ build() {
 
   pushd "$(go env GOPATH)/src/k8s.io/kubernetes"
   echo "Checking out Kubernetes version: ${KUBERNETES_VERSION}"
+  git fetch
   git checkout -b "${KUBERNETES_VERSION}" "refs/tags/${KUBERNETES_VERSION}"
 
   # cleanup old _output/bin folder

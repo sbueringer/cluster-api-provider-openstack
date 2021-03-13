@@ -34,20 +34,27 @@ export GO111MODULE=on
 export DOCKER_CLI_EXPERIMENTAL := enabled
 
 # Directories.
+ARTIFACTS ?= $(REPO_ROOT)/_artifacts
 TOOLS_DIR := hack/tools
 TOOLS_BIN_DIR := $(TOOLS_DIR)/bin
 BIN_DIR := bin
 
+# Files
+E2E_DATA_DIR ?= $(REPO_ROOT)/test/e2e/data
+E2E_CONF_PATH  ?= $(E2E_DATA_DIR)/e2e_conf.yaml
+KUBETEST_CONF_PATH ?= $(abspath $(E2E_DATA_DIR)/kubetest/conformance.yaml)
+KUBETEST_FAST_CONF_PATH ?= $(abspath $(E2E_DATA_DIR)/kubetest/conformance-fast.yaml)
+
 # Binaries.
-KUSTOMIZE := $(TOOLS_BIN_DIR)/kustomize
 CLUSTERCTL := $(TOOLS_BIN_DIR)/clusterctl
 CONTROLLER_GEN := $(TOOLS_BIN_DIR)/controller-gen
+CONVERSION_GEN := $(TOOLS_BIN_DIR)/conversion-gen
 ENVSUBST := $(TOOLS_BIN_DIR)/envsubst
 GOLANGCI_LINT := $(TOOLS_BIN_DIR)/golangci-lint
+KIND := $(TOOLS_BIN_DIR)/kind
+KUSTOMIZE := $(TOOLS_BIN_DIR)/kustomize
 MOCKGEN := $(TOOLS_BIN_DIR)/mockgen
-CONVERSION_GEN := $(TOOLS_BIN_DIR)/conversion-gen
-RELEASE_NOTES_BIN := bin/release-notes
-RELEASE_NOTES := $(TOOLS_DIR)/$(RELEASE_NOTES_BIN)
+RELEASE_NOTES := $(TOOLS_BIN_DIR)/release-notes
 GINKGO := $(TOOLS_BIN_DIR)/ginkgo
 
 # Define Docker related variables. Releases should modify and double check these vars.
@@ -103,17 +110,32 @@ check: modules generate lint test verify
 
 .PHONY: test
 test: generate lint ## Run tests
-	$(MAKE) test-go
-
-.PHONY: test-go
-test-go: ## Run golang tests
 	go test -v ./...
+
+E2E_ARGS ?=
+
+.PHONY: test-e2e ## Run e2e tests using clusterctl
+test-e2e: $(GINKGO) $(KIND) $(KUSTOMIZE) e2e-image ## Run e2e tests
+	time $(GINKGO) -trace -progress -v -tags=e2e $(GINKGO_ARGS) ./test/e2e/... -- -config-path="$(E2E_CONF_PATH)" -artifacts-folder="$(ARTIFACTS)" --data-folder="$(E2E_DATA_DIR)" $(E2E_ARGS)
+
+.PHONY: e2e-image
+e2e-image: docker-pull-prerequisites
+	docker build -f Dockerfile --tag="gcr.io/k8s-staging-capi-openstack/capi-openstack-controller-amd64:e2e" .
+
+CONFORMANCE_E2E_ARGS ?= -kubetest.config-file=$(KUBETEST_CONF_PATH)
+CONFORMANCE_E2E_ARGS += $(E2E_ARGS)
+CONFORMANCE_GINKGO_ARGS ?= -stream
+CONFORMANCE_GINKGO_ARGS += $(GINKGO_ARGS)
+.PHONY: test-conformance
+test-conformance: $(GINKGO) $(KIND) $(KUSTOMIZE) e2e-image ## Run clusterctl based conformance test on workload cluster (requires Docker).
+	time $(GINKGO) -trace -progress -v -tags=e2e -focus="conformance" $(CONFORMANCE_GINKGO_ARGS) ./test/e2e/suites/conformance/... -- -config-path="$(E2E_CONF_PATH)" -artifacts-folder="$(ARTIFACTS)" --data-folder="$(E2E_DATA_DIR)" $(CONFORMANCE_E2E_ARGS)
+
+test-conformance-fast: ## Run clusterctl based conformance test on workload cluster (requires Docker) using a subset of the conformance suite in parallel.
+	$(MAKE) test-conformance CONFORMANCE_E2E_ARGS="-kubetest.config-file=$(KUBETEST_FAST_CONF_PATH) -kubetest.ginkgo-nodes=5 $(E2E_ARGS)"
 
 ## --------------------------------------
 ## Binaries
 ## --------------------------------------
-$(GINKGO): $(TOOLS_DIR)/go.mod
-	cd $(TOOLS_DIR) && go build -tags=tools -o $(BIN_DIR)/ginkgo github.com/onsi/ginkgo/ginkgo
 
 .PHONY: binaries
 binaries: manager ## Builds and installs all binaries
@@ -126,29 +148,9 @@ manager: ## Build manager binary.
 ## Tooling Binaries
 ## --------------------------------------
 
+## FIXME: do we still need it?
 $(CLUSTERCTL): ## Build clusterctl binary (we have to set some gitVersion, otherwise commands will fail)
 	cd $(TOOLS_DIR); go build -tags=tools -ldflags "-X 'sigs.k8s.io/cluster-api/version.gitVersion=v0.4.0-dirty'" -o $(BIN_DIR)/clusterctl sigs.k8s.io/cluster-api/cmd/clusterctl
-
-$(KUSTOMIZE): # Build kustomize from tools folder.
-	hack/ensure-kustomize.sh
-
-$(CONTROLLER_GEN): $(TOOLS_DIR)/go.mod # Build controller-gen from tools folder.
-	cd $(TOOLS_DIR); go build -tags=tools -o $(BIN_DIR)/controller-gen sigs.k8s.io/controller-tools/cmd/controller-gen
-
-$(ENVSUBST): $(TOOLS_DIR)/go.mod # Build envsubst from tools folder.
-	cd $(TOOLS_DIR); go build -tags=tools -o $(BIN_DIR)/envsubst github.com/a8m/envsubst/cmd/envsubst
-
-$(GOLANGCI_LINT): $(TOOLS_DIR)/go.mod # Build golangci-lint from tools folder.
-	cd $(TOOLS_DIR); go build -tags=tools -o $(BIN_DIR)/golangci-lint github.com/golangci/golangci-lint/cmd/golangci-lint
-
-$(MOCKGEN): $(TOOLS_DIR)/go.mod # Build mockgen from tools folder.
-	cd $(TOOLS_DIR); go build -tags=tools -o $(BIN_DIR)/mockgen github.com/golang/mock/mockgen
-
-$(CONVERSION_GEN): $(TOOLS_DIR)/go.mod
-	cd $(TOOLS_DIR); go build -tags=tools -o $(BIN_DIR)/conversion-gen k8s.io/code-generator/cmd/conversion-gen
-
-$(RELEASE_NOTES) : $(TOOLS_DIR)/go.mod
-	cd $(TOOLS_DIR) && go build -tags tools -o $(BIN_DIR)/release-notes sigs.k8s.io/cluster-api/hack/tools/release
 
 ## --------------------------------------
 ## Linting
